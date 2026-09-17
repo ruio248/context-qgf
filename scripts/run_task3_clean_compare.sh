@@ -87,18 +87,23 @@ if [[ "$DISABLE_MULTICCD" == "1" ]]; then
     MULTICCD_ARGS+=(--disable-multiccd)
 fi
 
+native_checkpoints=()
+context_checkpoints=()
+train_pids=()
+
 for seed in $SEEDS; do
+    seed_index="$((seed - 1))"
     seed_padded="$(printf '%02d' "$seed")"
     native_checkpoint="$(native_checkpoint_for_seed "$seed")"
     if [[ ! -f "$native_checkpoint/params_${EPOCH}.pkl" ]]; then
         echo "Missing native QGF checkpoint: $native_checkpoint/params_${EPOCH}.pkl" >&2
         exit 1
     fi
-
-    context_checkpoint="$(context_checkpoint_for_seed "$seed")"
+    native_checkpoints["$seed_index"]="$native_checkpoint"
+    context_checkpoints["$seed_index"]="$(context_checkpoint_for_seed "$seed")"
     gpu_index="$(( (seed - 1 + GPU_OFFSET) % GPU_COUNT ))"
 
-    if [[ -z "$context_checkpoint" ]]; then
+    if [[ -z "${context_checkpoints[$seed_index]}" ]]; then
         train_log="$LOG_DIR/train_context_seed${seed_padded}.log"
         echo "Training Context-Q seed ${seed} on GPU ${gpu_index}" >&2
         (
@@ -128,15 +133,41 @@ for seed in $SEEDS; do
                 --agent.context_include_reward=true \
                 --agent.context_length=20 \
                 --agent.min_context_transitions=20
-        ) >"$train_log" 2>&1
+        ) >"$train_log" 2>&1 &
+        train_pids["$seed_index"]=$!
+    else
+        echo "Reusing Context-Q seed ${seed}: ${context_checkpoints[$seed_index]}" >&2
+        train_pids["$seed_index"]=""
+    fi
+done
 
+training_failed=0
+for seed in $SEEDS; do
+    seed_index="$((seed - 1))"
+    if [[ -n "${train_pids[$seed_index]}" ]]; then
+        if ! wait "${train_pids[$seed_index]}"; then
+            echo "Context-Q training failed for seed ${seed}; see $LOG_DIR/train_context_seed$(printf '%02d' "$seed").log" >&2
+            training_failed=1
+        fi
+    fi
+done
+if [[ "$training_failed" -ne 0 ]]; then
+    exit 1
+fi
+
+for seed in $SEEDS; do
+    seed_index="$((seed - 1))"
+    seed_padded="$(printf '%02d' "$seed")"
+    native_checkpoint="${native_checkpoints[$seed_index]}"
+    context_checkpoint="${context_checkpoints[$seed_index]}"
+    gpu_index="$(( (seed - 1 + GPU_OFFSET) % GPU_COUNT ))"
+
+    if [[ -z "$context_checkpoint" ]]; then
         context_checkpoint="$(context_checkpoint_for_seed "$seed")"
         if [[ -z "$context_checkpoint" ]]; then
-            echo "Context-Q training finished without a params_${EPOCH}.pkl checkpoint; see $train_log" >&2
+            echo "Context-Q training finished without a params_${EPOCH}.pkl checkpoint for seed ${seed}; see $LOG_DIR/train_context_seed${seed_padded}.log" >&2
             exit 1
         fi
-    else
-        echo "Reusing Context-Q seed ${seed}: $context_checkpoint" >&2
     fi
 
     mc_output="$MC_SAVE_ROOT/mc_seed${seed_padded}"
