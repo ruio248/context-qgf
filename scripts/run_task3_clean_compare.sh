@@ -113,6 +113,11 @@ for seed in $SEEDS; do
                 --save_dir="$CONTEXT_SAVE_ROOT" \
                 --offline_steps=500000 \
                 --agent.batch_size=1024 \
+                --agent.action_chunking=True \
+                --agent.horizon_length=5 \
+                --agent.discount=0.999 \
+                --agent.actor_hidden_dims='(1024,1024,1024,1024)' \
+                --agent.value_network_kwargs.hidden_dims='(1024,1024,1024,1024)' \
                 --eval_interval=100000 \
                 --save_interval=100000 \
                 --guidance_weights=0.0,0.004,0.008,0.01,0.02,0.04,0.06,0.08 \
