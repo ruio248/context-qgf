@@ -58,6 +58,52 @@ class MLP(nn.Module):
         return x
 
 
+class ContextInputMLP(nn.Module):
+    """MLP with a PEARL latent projection in its first hidden layer.
+
+    The ordinary Dense and LayerNorm names intentionally match :class:`MLP`.
+    With ``context_ready=0`` the extra projection is removed algebraically,
+    yielding the same network as native QGF for matching backbone parameters.
+    """
+
+    hidden_dims: Sequence[int]
+    latent_dim: int
+    activation: Any = nn.gelu
+    activate_final: bool = False
+    kernel_init: Any = default_init()
+    context_kernel_init_scale: float = 1e-2
+    layer_norm: bool = False
+
+    @nn.compact
+    def __call__(self, x, latent, context_ready):
+        latent = jnp.asarray(latent, dtype=x.dtype)
+        ready = jnp.asarray(context_ready, dtype=x.dtype)[..., None]
+        for index, size in enumerate(self.hidden_dims):
+            x = nn.Dense(
+                size,
+                kernel_init=self.kernel_init,
+                name=f"Dense_{index}",
+            )(x)
+            is_feature_layer = (
+                index + 1 < len(self.hidden_dims) or self.activate_final
+            )
+            if index == 0 and is_feature_layer:
+                context_projection = nn.Dense(
+                    size,
+                    use_bias=False,
+                    kernel_init=default_init(self.context_kernel_init_scale),
+                    name="ContextInput",
+                )(latent)
+                x = x + ready * context_projection
+            if index + 1 < len(self.hidden_dims) and self.layer_norm:
+                x = nn.LayerNorm(name=f"LayerNorm_{index}")(x)
+            if is_feature_layer:
+                x = self.activation(x)
+            if index == len(self.hidden_dims) - 2:
+                self.sow("intermediates", "feature", x)
+        return x
+
+
 class BroNet(nn.Module):
     """
     BroNet for critic learning: https://arxiv.org/pdf/2405.16158
@@ -341,3 +387,37 @@ class Value(nn.Module):
         v = self.value_net(inputs).squeeze(-1)
 
         return v
+
+
+class ContextValue(nn.Module):
+    """Context-conditioned Q/V network with an exact zero-context gate."""
+
+    latent_dim: int
+    num_ensembles: int = 2
+    encoder: nn.Module = None
+    network_class: str = "MLP"
+    network_kwargs: Dict[str, Any] = field(default_factory=dict)
+    context_kernel_init_scale: float = 1e-2
+
+    def setup(self):
+        if self.network_class != "MLP":
+            raise ValueError("ContextValue currently supports network_class='MLP' only")
+        network_args = {
+            "hidden_dims": (*self.network_kwargs["hidden_dims"], 1),
+            "latent_dim": self.latent_dim,
+            "activate_final": False,
+            "layer_norm": self.network_kwargs["layer_norm"],
+            "context_kernel_init_scale": self.context_kernel_init_scale,
+        }
+        if "activation" in self.network_kwargs:
+            network_args["activation"] = self.network_kwargs["activation"]
+        network = ContextInputMLP
+        if self.num_ensembles > 1:
+            network = ensemblize(network, self.num_ensembles)
+        self.value_net = network(**network_args)
+
+    def __call__(self, observations, actions, latent, context_ready):
+        inputs = self.encoder(observations) if self.encoder is not None else observations
+        if actions is not None:
+            inputs = jnp.concatenate([inputs, actions], axis=-1)
+        return self.value_net(inputs, latent, context_ready).squeeze(-1)

@@ -1,5 +1,6 @@
 from agents.bc import BCAgent
 from agents.cfgrl import CFGRLAgent
+from agents.context_qgf import ContextQGFAgent
 from agents.dcgql import DCGQLAgent
 from agents.dsrl import DSRLAgent
 from agents.edp import EDPAgent
@@ -22,6 +23,7 @@ agents = dict(
     iql=IQLAgent,
     iql_diffusion=IQLDiffusionAgent,
     cfgrl=CFGRLAgent,
+    context_qgf=ContextQGFAgent,
     qgf=QGFAgent,
     robust_q=RobustQAgent,
     sac=SACAgent,
