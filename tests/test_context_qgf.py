@@ -8,6 +8,7 @@ from flax import traverse_util
 from agents.context_qgf import ContextQGFAgent
 from agents.context_qgf import get_config as get_context_config
 from agents.qgf import QGFAgent
+from utils.flax_utils import target_update
 from utils.context import (
     CausalPearlEncoder,
     kl_to_standard_normal,
@@ -164,6 +165,36 @@ class ContextQGFAgentTest(unittest.TestCase):
                 updated.context_encoder.params,
             ),
             0.0,
+        )
+
+    def test_target_critic_uses_pre_update_critic(self):
+        batch = self.batch()
+        updated, _ = self.context_agent.update(batch)
+        expected_target = target_update(
+            self.context_agent.critic,
+            self.context_agent.target_critic,
+            self.context_agent.config["tau"],
+        )
+        self.assertEqual(
+            tree_l1(updated.target_critic.params, expected_target.params),
+            0.0,
+        )
+
+    def test_value_loss_uses_pre_update_encoder(self):
+        batch = self.batch()
+        value_rng = jax.random.fold_in(self.context_agent.rng, 2)
+        expected_value, _ = self.context_agent.value.apply_loss_fn(
+            loss_fn=lambda params: self.context_agent.value_loss(
+                batch,
+                value_params=params,
+                context_params=self.context_agent.context_encoder.params,
+                rng=value_rng,
+            )
+        )
+        updated, _ = self.context_agent.update(batch)
+        self.assertLess(
+            tree_l1(updated.value.params, expected_value.params),
+            1e-5,
         )
 
     def test_actor_update_is_identical_to_native_qgf(self):

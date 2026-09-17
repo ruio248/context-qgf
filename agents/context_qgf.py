@@ -240,14 +240,14 @@ class ContextQGFAgent(QGFAgent):
             grads=context_grads
         )
         new_target_critic = target_update(
-            new_critic, self.target_critic, self.config["tau"]
+            self.critic, self.target_critic, self.config["tau"]
         )
 
         new_value, value_info = self.value.apply_loss_fn(
             loss_fn=lambda params: self.value_loss(
                 batch,
                 value_params=params,
-                context_params=new_context_encoder.params,
+                context_params=self.context_encoder.params,
                 rng=value_rng,
             )
         )
