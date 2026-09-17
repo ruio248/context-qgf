@@ -9,6 +9,8 @@ import jax.numpy as jnp
 import numpy as np
 from flax.core.frozen_dict import FrozenDict
 
+from utils.context import transition_token_numpy
+
 
 def get_size(data):
     """Return the size of the dataset."""
@@ -62,6 +64,8 @@ class Dataset(FrozenDict):
         self.return_next_actions = (
             False  # Whether to additionally return next actions; set outside the class.
         )
+        self.context_normalization = None
+        self.context_include_reward = True
 
         # Compute terminal and initial locations.
         self.terminal_locs = np.nonzero(self["terminals"] > 0)[0]
@@ -113,7 +117,7 @@ class Dataset(FrozenDict):
                 self.augment(batch, ["observations", "next_observations"])
         return batch
 
-    def sample_sequence(self, batch_size, sequence_length, discount):
+    def sample_sequence(self, batch_size, sequence_length, discount, idxs=None):
         """Sample a batch of sequences for n-step returns / action chunking.
 
         Args:
@@ -131,7 +135,14 @@ class Dataset(FrozenDict):
                 terminals:         (batch_size, H)
                 valid:             (batch_size, H)  — 0 after episode terminates
         """
-        idxs = np.random.randint(self.size - sequence_length + 1, size=batch_size)
+        if idxs is None:
+            idxs = np.random.randint(self.size - sequence_length + 1, size=batch_size)
+        else:
+            idxs = np.asarray(idxs, dtype=np.int64)
+            if idxs.shape != (batch_size,):
+                raise ValueError(f"idxs must have shape ({batch_size},), got {idxs.shape}")
+            if np.any(idxs < 0) or np.any(idxs + sequence_length > self.size):
+                raise ValueError("sequence indices are outside the dataset")
 
         data = {k: v[idxs] for k, v in self.items()}
 
@@ -188,6 +199,83 @@ class Dataset(FrozenDict):
             valid=valid,
             next_observations=next_observations,
         )
+
+    def sample_context_sequence(
+        self, batch_size, sequence_length, context_length, discount, idxs=None
+    ):
+        """Sample an n-step batch with strictly causal transition histories.
+
+        ``context`` contains only transitions before the query start.  The
+        corresponding ``next_context`` appends the completed query transitions
+        and is therefore valid for the bootstrap value. Histories stop at the
+        episode boundary and are left padded with a zero mask.
+        """
+
+        if context_length <= 0:
+            raise ValueError("context_length must be positive")
+        if idxs is None:
+            idxs = np.random.randint(self.size - sequence_length + 1, size=batch_size)
+        else:
+            idxs = np.asarray(idxs, dtype=np.int64)
+            if idxs.shape != (batch_size,):
+                raise ValueError(f"idxs must have shape ({batch_size},), got {idxs.shape}")
+        batch = self.sample_sequence(
+            batch_size, sequence_length, discount, idxs=idxs
+        )
+
+        observations = np.asarray(self["observations"])
+        actions = np.asarray(self["actions"])
+        if observations.ndim != 2 or actions.ndim != 2:
+            raise ValueError("Context-Q v1 supports vector observations/actions only")
+        token_dim = 2 * observations.shape[-1] + actions.shape[-1] + 2
+        contexts = np.zeros((batch_size, context_length, token_dim), np.float32)
+        masks = np.zeros((batch_size, context_length), np.float32)
+        next_contexts = np.zeros_like(contexts)
+        next_masks = np.zeros_like(masks)
+
+        def token(index):
+            return transition_token_numpy(
+                self["observations"][index],
+                self["actions"][index],
+                self["rewards"][index],
+                self["next_observations"][index],
+                self["terminals"][index],
+                normalization=self.context_normalization,
+                include_reward=bool(self.context_include_reward),
+            )
+
+        def write(destination, destination_mask, row, indices):
+            recent = list(indices[-context_length:])
+            if recent:
+                destination[row, -len(recent) :] = np.stack(
+                    [token(index) for index in recent]
+                )
+                destination_mask[row, -len(recent) :] = 1.0
+
+        for row, query_start in enumerate(idxs.tolist()):
+            episode_index = (
+                np.searchsorted(self.initial_locs, query_start, side="right") - 1
+            )
+            episode_start = int(self.initial_locs[episode_index])
+            prefix = list(
+                range(max(episode_start, query_start - context_length), query_start)
+            )
+            write(contexts, masks, row, prefix)
+            endpoint = list(prefix)
+            for offset in range(sequence_length):
+                index = query_start + offset
+                endpoint.append(index)
+                if self["terminals"][index] > 0:
+                    break
+            write(next_contexts, next_masks, row, endpoint)
+
+        batch.update(
+            context=contexts,
+            context_mask=masks,
+            next_context=next_contexts,
+            next_context_mask=next_masks,
+        )
+        return batch
 
     def get_subset(self, idxs):
         """Return a subset of the dataset given the indices."""
@@ -285,6 +373,8 @@ class Dataset(FrozenDict):
         dataset.frame_stack = load_dict.get("frame_stack")
         dataset.p_aug = load_dict.get("p_aug")
         dataset.return_next_actions = load_dict.get("return_next_actions", False)
+        dataset.context_normalization = load_dict.get("context_normalization")
+        dataset.context_include_reward = load_dict.get("context_include_reward", True)
 
         # Recompute terminal and initial locations
         dataset.terminal_locs = np.nonzero(dataset["terminals"] > 0)[0]
@@ -408,6 +498,8 @@ class ReplayBuffer(Dataset):
             frame_stack=self.frame_stack,
             p_aug=self.p_aug,
             return_next_actions=getattr(self, "return_next_actions", False),
+            context_normalization=getattr(self, "context_normalization", None),
+            context_include_reward=getattr(self, "context_include_reward", True),
             class_name=self.__class__.__name__,
         )
         save_path = os.path.join(save_dir, f"{prefix}_{epoch}.pkl")

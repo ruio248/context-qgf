@@ -21,6 +21,7 @@ from envs.env_utils import make_env_and_datasets
 from envs.ogbench_utils import make_ogbench_env_and_datasets
 from ml_collections import config_flags
 from utils.datasets import Dataset, ReplayBuffer, load_replay_buffer
+from utils.context import pad_context_numpy, transition_token_numpy
 from utils.evaluation import eval_standard, eval_with_test_time_guidance, flatten
 from utils.flax_utils import restore_agent, save_agent
 from utils.log_utils import CsvLogger, get_flag_dict, get_wandb_video, setup_wandb
@@ -134,6 +135,17 @@ def _remap_sparse_env_reward(reward):
     return out.item() if out.ndim == 0 else out
 
 
+def _configure_context_dataset(dataset, config):
+    """Attach the explicit token contract to a Dataset/ReplayBuffer instance."""
+
+    if getattr(config, "context_length", 0) > 0:
+        dataset.context_normalization = config.get("context_normalization", None)
+        dataset.context_include_reward = bool(
+            config.get("context_include_reward", True)
+        )
+    return dataset
+
+
 def _setup_experiment(config):
     """Create experiment names and save directory."""
     agent_name = config["agent_name"]
@@ -213,6 +225,7 @@ def _setup_data(config):
         ), "Online fine-tuning is currently not supported for visual environments."
 
     train_dataset = Dataset.create(**train_dataset)
+    _configure_context_dataset(train_dataset, config)
 
     # Create replay buffer
     if FLAGS.balanced_sampling:
@@ -224,6 +237,7 @@ def _setup_data(config):
         train_dataset = ReplayBuffer.create_from_initial_dataset(
             dict(train_dataset), size=max(FLAGS.buffer_size, train_dataset.size + 1)
         )
+        _configure_context_dataset(train_dataset, config)
         replay_buffer = train_dataset
         gc.collect()
 
@@ -249,6 +263,21 @@ def _setup_data(config):
         replay_buffer=replay_buffer,
         vec_eval_env=vec_eval_env,
         example_batch=example_batch,
+    )
+
+
+def _sample_training_batch(dataset, config, batch_size):
+    if int(config.get("context_length", 0)) > 0:
+        return dataset.sample_context_sequence(
+            batch_size,
+            sequence_length=config["horizon_length"],
+            context_length=config["context_length"],
+            discount=config["discount"],
+        )
+    return dataset.sample_sequence(
+        batch_size,
+        sequence_length=config["horizon_length"],
+        discount=config["discount"],
     )
 
 
@@ -425,13 +454,10 @@ def main(_):
                     reward_bias=FLAGS.reward_bias,
                     sparse=FLAGS.sparse,
                 )
+                train_dataset = _configure_context_dataset(train_dataset, config)
 
             # sample batch and update
-            batch = train_dataset.sample_sequence(
-                config["batch_size"],
-                sequence_length=config["horizon_length"],
-                discount=config["discount"],
-            )
+            batch = _sample_training_batch(train_dataset, config, config["batch_size"])
             agent, update_info = agent.update(batch)
         else:
 
@@ -487,25 +513,19 @@ def main(_):
             # Update agent.
             if FLAGS.balanced_sampling:
                 # Half-and-half sampling from the training dataset and the replay buffer.
-                dataset_batch = train_dataset.sample_sequence(
-                    config["batch_size"] // 2,
-                    sequence_length=config["horizon_length"],
-                    discount=config["discount"],
+                dataset_batch = _sample_training_batch(
+                    train_dataset, config, config["batch_size"] // 2
                 )
-                replay_batch = replay_buffer.sample_sequence(
-                    config["batch_size"] // 2,
-                    sequence_length=config["horizon_length"],
-                    discount=config["discount"],
+                replay_batch = _sample_training_batch(
+                    replay_buffer, config, config["batch_size"] // 2
                 )
                 batch = {
                     k: np.concatenate([dataset_batch[k], replay_batch[k]], axis=0)
                     for k in dataset_batch
                 }
             else:
-                batch = replay_buffer.sample_sequence(
-                    config["batch_size"],
-                    sequence_length=config["horizon_length"],
-                    discount=config["discount"],
+                batch = _sample_training_batch(
+                    replay_buffer, config, config["batch_size"]
                 )
 
             agent, update_info = agent.update(batch)
@@ -517,10 +537,9 @@ def main(_):
             train_metrics["training/rewards_max"] = batch["rewards"].max()
             train_metrics["training/rewards_min"] = batch["rewards"].min()
             if val_dataset is not None:
-                val_batch = val_dataset.sample_sequence(
-                    config["batch_size"],
-                    sequence_length=config["horizon_length"],
-                    discount=config["discount"],
+                _configure_context_dataset(val_dataset, config)
+                val_batch = _sample_training_batch(
+                    val_dataset, config, config["batch_size"]
                 )
                 _, val_info = agent.total_loss(val_batch, grad_params=None)
                 train_metrics.update(

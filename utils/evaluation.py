@@ -7,6 +7,8 @@ import jax
 import numpy as np
 import tqdm
 
+from utils.context import pad_context_numpy, transition_token_numpy
+
 
 def supply_rng(f, rng=jax.random.PRNGKey(0)):
     """Helper function to split the random number generator key before each call to the function."""
@@ -162,8 +164,10 @@ def _vector_infos_to_list(infos, num_envs):
     return [infos for _ in range(num_envs)]
 
 
-def _prepare_actor(agent, guidance_weight, rejection_sampling):
-    rng = jax.random.PRNGKey(np.random.randint(0, 2**32))
+def _prepare_actor(agent, guidance_weight, rejection_sampling, action_seed=None):
+    if action_seed is None:
+        action_seed = int(np.random.randint(0, 2**32))
+    rng = jax.random.PRNGKey(action_seed)
     sample_actions = partial(supply_rng(agent.sample_actions, rng=rng))
 
     if _is_test_time_guidance_agent(agent):
@@ -192,6 +196,8 @@ def run_episodes(
     should_render=False,
     video_frame_skip=3,
     rejection_sampling=1,
+    episode_seed=None,
+    action_seed=None,
 ):
     """Shared rollout for sequential and vectorized environments (batch-first).
 
@@ -207,6 +213,7 @@ def run_episodes(
         agent,
         guidance_weight=guidance_weight,
         rejection_sampling=rejection_sampling,
+        action_seed=action_seed,
     )
 
     # Detect action chunking from agent config. `horizon_length` can be used for
@@ -218,7 +225,7 @@ def run_episodes(
         action_dim = int(action_dim)
     rollout_horizon = horizon_length if action_chunking else 1
 
-    observations, _ = env.reset(options=dict(task_id=task_id))
+    observations, _ = env.reset(seed=episode_seed, options=dict(task_id=task_id))
 
     num_envs = env.num_envs
 
@@ -233,6 +240,10 @@ def run_episodes(
 
     # Per-env action queues for action chunking (H > 1).
     action_queues = [[] for _ in range(num_envs)]
+    supports_context = bool(getattr(agent, "support_context", False))
+    context_histories = [[] for _ in range(num_envs)]
+    context_length = int(agent.config.get("context_length", 0))
+    context_token_dim = int(agent.config.get("context_token_dim", 0))
 
     while not np.all(~active):
         # Determine which envs need a new action chunk.
@@ -241,7 +252,22 @@ def run_episodes(
         need_chunk = [i for i in range(num_envs) if not action_queues[i]]
         if need_chunk:
             subset_obs = observations[need_chunk]
-            raw = actor_fn(observations=subset_obs)
+            actor_kwargs = {}
+            if supports_context:
+                padded = [
+                    pad_context_numpy(
+                        context_histories[index],
+                        context_length,
+                        context_token_dim,
+                    )
+                    for index in need_chunk
+                ]
+                actor_kwargs["context"] = np.stack([item[0] for item in padded])
+                actor_kwargs["context_mask"] = np.stack([item[1] for item in padded])
+                actor_kwargs["deterministic_latent"] = bool(
+                    agent.config.get("deterministic_context_eval", True)
+                )
+            raw = actor_fn(observations=subset_obs, **actor_kwargs)
             raw = np.atleast_2d(np.array(raw))
 
             if rollout_horizon > 1:
@@ -296,6 +322,22 @@ def run_episodes(
                     info=info,
                 )
                 add_to(trajectories[idx], copy.deepcopy(transition))
+                if supports_context:
+                    context_histories[idx].append(
+                        transition_token_numpy(
+                            observations[idx],
+                            actions[idx],
+                            reward,
+                            next_observation,
+                            done_now[idx],
+                            normalization=agent.config.get(
+                                "context_normalization", None
+                            ),
+                            include_reward=bool(
+                                agent.config.get("context_include_reward", True)
+                            ),
+                        )
+                    )
 
                 if should_render and (
                     lengths[idx] % video_frame_skip == 0 or done_now[idx]
