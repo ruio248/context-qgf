@@ -52,6 +52,12 @@ def parse_args():
             "Context-Q agent to isolate the Q-conditioning effect."
         ),
     )
+    parser.add_argument(
+        "--latent-mode",
+        choices=["mean", "sample"],
+        default="mean",
+        help="Use the posterior mean or one posterior sample per action chunk.",
+    )
     return parser.parse_args()
 
 
@@ -105,6 +111,7 @@ def rollout_episode(
     episode_index,
     episode_seed,
     action_seed_base,
+    latent_mode="mean",
 ):
     environment.unwrapped._paired_action_space.seed(episode_seed)
     observation, _ = environment.reset(
@@ -138,7 +145,7 @@ def rollout_episode(
                 guidance_weight=float(alpha),
                 context=jnp.asarray(context_tokens),
                 context_mask=jnp.asarray(context_mask),
-                deterministic_latent=True,
+                deterministic_latent=(latent_mode == "mean"),
             )
         else:
             flat = agent.sample_actions(
@@ -248,6 +255,7 @@ def main():
             episode_index=episode_index,
             episode_seed=episode_seed,
             action_seed_base=args.action_seed_base,
+            latent_mode=args.latent_mode,
         )
         context_result = rollout_episode(
             environment,
@@ -257,6 +265,7 @@ def main():
             episode_index=episode_index,
             episode_seed=episode_seed,
             action_seed_base=args.action_seed_base,
+            latent_mode=args.latent_mode,
         )
 
         rows.append(
@@ -295,6 +304,7 @@ def main():
             ),
             "disable_multiccd": bool(args.disable_multiccd),
             "context_actor_source": args.context_actor_source,
+            "latent_mode": args.latent_mode,
             "native_flags_seed": native_flags["seed"],
             "context_flags_seed": context_flags["seed"],
         },
