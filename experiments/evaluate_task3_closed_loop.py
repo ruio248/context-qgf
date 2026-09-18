@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """Paired Task3 closed-loop success evaluation for native QGF and Context-Q.
 
-Every episode is rolled out twice under the same reset seed and the same
-initial action-noise seed: once with the native QGF agent and once with the
-Context-Q agent.  The only intended difference is the context conditioning
-path.  This is the policy-level counterpart of the MC calibration evaluator.
+Each episode is rolled out twice with the same reset seed and the same
+per-chunk action-noise keys.  Unlike the MC evaluator, this measures the
+actual closed-loop policy success and return of both agents.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import sys
@@ -18,10 +18,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 
 from experiments.evaluate_task3_mc import load_checkpoint, make_env, tree_sha256
-from utils.evaluation import flatten, run_episodes
+from utils.context import pad_context_numpy, transition_token_numpy
+from utils.evaluation import flatten
 
 
 def parse_args():
@@ -47,28 +50,113 @@ def atomic_json(path: Path, value):
     os.replace(temporary, path)
 
 
-def action_seed_for_episode(base: int, episode: int) -> int:
-    return (int(base) + 10_007 * int(episode)) % (2**32)
+def action_key(base: int, episode: int, chunk: int):
+    integer = (int(base) + 10_007 * int(episode)) % (2**32)
+    return jax.random.fold_in(jax.random.PRNGKey(integer), int(chunk))
 
 
-def rollout_episode(agent, env, *, episode_seed, action_seed, guidance_weight):
-    trajectories, _, returns, lengths = run_episodes(
-        agent,
-        env,
-        guidance_weight=guidance_weight,
-        episode_seed=episode_seed,
-        action_seed=action_seed,
-        rejection_sampling=1,
+def nested_success(info):
+    flat = flatten(info)
+    if "success" in flat:
+        return float(flat["success"])
+    raise RuntimeError(f"Environment info does not contain success: {sorted(flat)}")
+
+
+def rollout_episode(
+    environment,
+    agent,
+    *,
+    contextual,
+    alpha,
+    episode_index,
+    episode_seed,
+    action_seed_base,
+    pre_context_steps,
+):
+    observation, _ = environment.reset(
+        seed=episode_seed, options={"task_id": None}
     )
-    final_info = trajectories[0]["info"][-1]
-    flat_info = flatten(final_info)
-    if "success" not in flat_info:
-        raise RuntimeError(f"Environment info does not contain success: {sorted(flat_info)}")
-    return (
-        float(flat_info["success"]),
-        float(returns[0]),
-        int(lengths[0]),
-    )
+    observation = np.asarray(observation, dtype=np.float32).reshape(-1)
+
+    history = []
+    episode_return = 0.0
+    episode_length = 0
+    chunk_index = 0
+    final_info = {}
+    done = False
+
+    horizon = int(agent.config["horizon_length"])
+    action_dim = int(agent.config["action_dim"])
+    include_reward = bool(agent.config.get("context_include_reward", True))
+    normalization = agent.config.get("context_normalization", None)
+
+    pre_context_digest = hashlib.sha256()
+
+    while not done:
+        key = action_key(action_seed_base, episode_index, chunk_index)
+        if contextual:
+            context_tokens, context_mask = pad_context_numpy(
+                history,
+                int(agent.config["context_length"]),
+                int(agent.config["context_token_dim"]),
+            )
+            flat = agent.sample_actions(
+                jnp.asarray(observation),
+                seed=key,
+                guidance_weight=float(alpha),
+                context=jnp.asarray(context_tokens),
+                context_mask=jnp.asarray(context_mask),
+                deterministic_latent=True,
+            )
+        else:
+            flat = agent.sample_actions(
+                jnp.asarray(observation),
+                seed=key,
+                guidance_weight=float(alpha),
+            )
+
+        commands = np.asarray(flat, dtype=np.float32).reshape(horizon, action_dim)
+        for command in commands:
+            command = np.clip(command, -1.0, 1.0).astype(np.float32)
+            if episode_length < pre_context_steps:
+                pre_context_digest.update(command.tobytes())
+
+            next_observation, reward, terminated, truncated, info = environment.step(
+                command
+            )
+            next_observation = np.asarray(
+                next_observation, dtype=np.float32
+            ).reshape(-1)
+
+            history.append(
+                transition_token_numpy(
+                    observation,
+                    command,
+                    reward,
+                    next_observation,
+                    bool(terminated or truncated),
+                    normalization=normalization if contextual else None,
+                    include_reward=include_reward,
+                )
+            )
+            history = history[-int(agent.config.get("context_length", 0)) :]
+
+            observation = next_observation
+            episode_return += float(reward)
+            episode_length += 1
+            final_info = info
+            done = bool(terminated or truncated)
+            if done:
+                break
+
+        chunk_index += 1
+
+    return {
+        "success": nested_success(final_info),
+        "return": episode_return,
+        "length": episode_length,
+        "pre_context_command_hash": pre_context_digest.hexdigest(),
+    }
 
 
 def paired_bootstrap(values, draws, seed):
@@ -106,6 +194,7 @@ def main():
     context, context_flags = load_checkpoint(
         args.context_checkpoint, args.epoch, observation, action, contextual=True
     )
+    pre_context_steps = int(context.config["min_context_transitions"])
 
     before = {
         "native": tree_sha256(native.target_critic.params),
@@ -114,36 +203,48 @@ def main():
     }
 
     rows = []
-    for episode in range(args.episodes):
-        episode_seed = (args.episode_seed_base + episode) % (2**32)
-        action_seed = action_seed_for_episode(args.action_seed_base, episode)
-        native_success, native_return, native_length = rollout_episode(
+    for episode_index in range(args.episodes):
+        episode_seed = (args.episode_seed_base + episode_index) % (2**32)
+        native_result = rollout_episode(
+            environment,
             native,
-            environment,
+            contextual=False,
+            alpha=args.guidance_weight,
+            episode_index=episode_index,
             episode_seed=episode_seed,
-            action_seed=action_seed,
-            guidance_weight=args.guidance_weight,
+            action_seed_base=args.action_seed_base,
+            pre_context_steps=pre_context_steps,
         )
-        context_success, context_return, context_length = rollout_episode(
+        context_result = rollout_episode(
+            environment,
             context,
-            environment,
+            contextual=True,
+            alpha=args.guidance_weight,
+            episode_index=episode_index,
             episode_seed=episode_seed,
-            action_seed=action_seed,
-            guidance_weight=args.guidance_weight,
+            action_seed_base=args.action_seed_base,
+            pre_context_steps=pre_context_steps,
         )
+        if (
+            native_result["pre_context_command_hash"]
+            != context_result["pre_context_command_hash"]
+        ):
+            raise AssertionError(
+                "Pre-context commands differ between native QGF and Context-Q"
+            )
+
         rows.append(
             {
-                "episode": episode,
+                "episode": episode_index,
                 "episode_seed": episode_seed,
-                "action_seed": action_seed,
-                "native_success": native_success,
-                "context_success": context_success,
-                "success_delta": context_success - native_success,
-                "native_return": native_return,
-                "context_return": context_return,
-                "return_delta": context_return - native_return,
-                "native_length": native_length,
-                "context_length": context_length,
+                "native_success": native_result["success"],
+                "context_success": context_result["success"],
+                "success_delta": context_result["success"] - native_result["success"],
+                "native_return": native_result["return"],
+                "context_return": context_result["return"],
+                "return_delta": context_result["return"] - native_result["return"],
+                "native_length": native_result["length"],
+                "context_length": context_result["length"],
             }
         )
 
@@ -163,8 +264,8 @@ def main():
             "episode_seed_base": args.episode_seed_base,
             "action_seed_base": args.action_seed_base,
             "paired_seed_protocol": (
-                "native and context share episode reset seeds and initial "
-                "action-noise seeds for every episode"
+                "native and context share episode reset seeds and per-chunk "
+                "action-noise keys for every episode"
             ),
             "disable_multiccd": bool(args.disable_multiccd),
             "native_flags_seed": native_flags["seed"],
@@ -190,6 +291,7 @@ def main():
         ),
         "paired_episodes": len(rows),
         "parameter_immutable": True,
+        "pre_context_commands_match": True,
     }
 
     atomic_json(output / "result.json", result)
