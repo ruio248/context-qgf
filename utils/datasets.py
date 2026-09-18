@@ -9,9 +9,6 @@ import jax.numpy as jnp
 import numpy as np
 from flax.core.frozen_dict import FrozenDict
 
-from utils.context import transition_token_numpy
-
-
 def get_size(data):
     """Return the size of the dataset."""
     sizes = jax.tree_util.tree_map(lambda arr: len(arr), data)
@@ -225,6 +222,9 @@ class Dataset(FrozenDict):
 
         observations = np.asarray(self["observations"])
         actions = np.asarray(self["actions"])
+        rewards = np.asarray(self["rewards"])
+        next_observations = np.asarray(self["next_observations"])
+        terminals = np.asarray(self["terminals"])
         if observations.ndim != 2 or actions.ndim != 2:
             raise ValueError("Context-Q v1 supports vector observations/actions only")
         token_dim = 2 * observations.shape[-1] + actions.shape[-1] + 2
@@ -233,41 +233,76 @@ class Dataset(FrozenDict):
         next_contexts = np.zeros_like(contexts)
         next_masks = np.zeros_like(masks)
 
-        def token(index):
-            return transition_token_numpy(
-                self["observations"][index],
-                self["actions"][index],
-                self["rewards"][index],
-                self["next_observations"][index],
-                self["terminals"][index],
-                normalization=self.context_normalization,
-                include_reward=bool(self.context_include_reward),
+        def tokens_for_indices(indices):
+            """Build transition tokens for a whole batch of dataset indices."""
+
+            indices = np.asarray(indices, dtype=np.int64)
+            obs = np.asarray(observations[indices], dtype=np.float32)
+            act = np.asarray(actions[indices], dtype=np.float32)
+            next_obs = np.asarray(next_observations[indices], dtype=np.float32)
+            rew = np.asarray(rewards[indices], dtype=np.float32).reshape(
+                len(indices), 1
+            )
+            done = np.asarray(terminals[indices], dtype=np.float32).reshape(
+                len(indices), 1
+            )
+            delta = next_obs - obs
+
+            if self.context_normalization is not None:
+                stats = {
+                    key: np.asarray(value, dtype=np.float32)
+                    for key, value in self.context_normalization.items()
+                }
+                obs = (obs - stats["observation_mean"]) / stats["observation_std"]
+                act = (act - stats["action_mean"]) / stats["action_std"]
+                rew = (rew - stats["reward_mean"]) / stats["reward_std"]
+                delta = (delta - stats["delta_mean"]) / stats["delta_std"]
+
+            if not bool(self.context_include_reward):
+                rew = np.zeros_like(rew)
+
+            return np.concatenate([obs, act, rew, delta, done], axis=-1).astype(
+                np.float32, copy=False
             )
 
-        def write(destination, destination_mask, row, indices):
-            recent = list(indices[-context_length:])
-            if recent:
-                destination[row, -len(recent) :] = np.stack(
-                    [token(index) for index in recent]
-                )
-                destination_mask[row, -len(recent) :] = 1.0
+        episode_index = (
+            np.searchsorted(self.initial_locs, idxs, side="right") - 1
+        )
+        episode_start = np.asarray(self.initial_locs[episode_index], dtype=np.int64)
 
-        for row, query_start in enumerate(idxs.tolist()):
-            episode_index = (
-                np.searchsorted(self.initial_locs, query_start, side="right") - 1
-            )
-            episode_start = int(self.initial_locs[episode_index])
-            prefix = list(
-                range(max(episode_start, query_start - context_length), query_start)
-            )
-            write(contexts, masks, row, prefix)
-            endpoint = list(prefix)
-            for offset in range(sequence_length):
-                index = query_start + offset
-                endpoint.append(index)
-                if self["terminals"][index] > 0:
-                    break
-            write(next_contexts, next_masks, row, endpoint)
+        for offset in range(context_length):
+            raw_indices = idxs - context_length + offset
+            valid = raw_indices >= episode_start
+            safe_indices = np.where(valid, raw_indices, 0).astype(np.int64)
+            tokens = tokens_for_indices(safe_indices)
+            tokens = np.where(valid[:, None], tokens, 0.0).astype(np.float32)
+            contexts[:, offset, :] = tokens
+            masks[:, offset] = valid.astype(np.float32)
+
+        next_contexts[...] = contexts
+        next_masks[...] = masks
+        active = np.ones(batch_size, dtype=bool)
+        for offset in range(sequence_length):
+            raw_indices = idxs + offset
+            safe_indices = np.where(active, raw_indices, 0).astype(np.int64)
+            tokens = tokens_for_indices(safe_indices)
+            tokens = np.where(active[:, None], tokens, 0.0).astype(np.float32)
+
+            shifted_contexts = np.empty_like(next_contexts)
+            shifted_contexts[:, :-1, :] = next_contexts[:, 1:, :]
+            shifted_contexts[:, -1, :] = tokens
+            next_contexts = np.where(
+                active[:, None, None], shifted_contexts, next_contexts
+            ).astype(np.float32)
+
+            shifted_masks = np.empty_like(next_masks)
+            shifted_masks[:, :-1] = next_masks[:, 1:]
+            shifted_masks[:, -1] = active.astype(np.float32)
+            next_masks = np.where(
+                active[:, None], shifted_masks, next_masks
+            ).astype(np.float32)
+
+            active = active & (terminals[raw_indices] == 0)
 
         batch.update(
             context=contexts,
