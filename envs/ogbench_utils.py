@@ -233,7 +233,28 @@ def make_ogbench_env_and_datasets(
         from ogbench.relabel_utils import relabel_dataset
 
         for d in datasets_to_process:
-            relabel_dataset(env_name, env, d)
+            # MuJoCo can occasionally hit a narrow-phase contact-count
+            # assertion while resetting the cube manipulation scene. The
+            # reset is only used to set the fixed task before relabeling; a
+            # fresh reset is safe and does not alter the offline data. Retry
+            # only this known compatibility failure and propagate every other
+            # exception unchanged.
+            for attempt in range(8):
+                try:
+                    relabel_dataset(env_name, env, d)
+                    break
+                # mujoco.FatalError inherits from BaseException in the
+                # installed bindings, so catch it here to make the retry
+                # effective while still propagating all unrelated errors.
+                except BaseException as exc:
+                    if "mj_narrowphase: collision function returned" not in str(exc):
+                        raise
+                    if attempt == 7:
+                        raise
+                    print(
+                        "Retrying OGBench relabel reset after MuJoCo "
+                        f"contact-limit failure ({attempt + 1}/7)."
+                    )
 
     if "oraclerep" in splits:
         # Add oracle goal representations to the datasets.

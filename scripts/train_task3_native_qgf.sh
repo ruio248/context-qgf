@@ -6,9 +6,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SEED="${1:-1}"
 SAVE_ROOT="${SAVE_ROOT:-${ROOT}/exp/task3_native_qgf}"
 DATASET_DIR="${OGBENCH_DATA_DIR:?Set OGBENCH_DATA_DIR to the OGBench root}"
+MUJOCO_PYTHONPATH="${MUJOCO_PYTHONPATH:-/home/lrh/qgf-native/mujoco_alt_381}"
 
 cd "$ROOT"
-exec python main.py \
+PYTHONPATH="$MUJOCO_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}" exec python main.py \
   --agent=agents/qgf.py \
   --env_name=cube-triple-play-singletask-task3-v0 \
   --ogbench_dataset_dir="${DATASET_DIR}/cube-triple-play-100m-v0/" \

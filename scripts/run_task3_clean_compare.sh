@@ -30,6 +30,7 @@ LOG_DIR="${LOG_DIR:-${ROOT}/exp/task3_clean_compare_logs}"
 GPU_OFFSET="${GPU_OFFSET:-0}"
 GPU_COUNT="${GPU_COUNT:-8}"
 MUJOCO_GL="${MUJOCO_GL:-egl}"
+MUJOCO_PYTHONPATH="${MUJOCO_PYTHONPATH:-/home/lrh/qgf-native/mujoco_alt_381}"
 
 mkdir -p "$LOG_DIR"
 mkdir -p "$MC_SAVE_ROOT"
@@ -110,6 +111,7 @@ for seed in $SEEDS; do
             cd "$ROOT"
             CUDA_VISIBLE_DEVICES="$gpu_index" \
             MUJOCO_GL="$MUJOCO_GL" \
+            PYTHONPATH="$MUJOCO_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}" \
             "$PYTHON_BIN" main.py \
                 --agent=agents/context_qgf.py \
                 --env_name=cube-triple-play-singletask-task3-v0 \
@@ -183,6 +185,7 @@ for seed in $SEEDS; do
             cd "$ROOT"
             CUDA_VISIBLE_DEVICES="$gpu_index" \
             MUJOCO_GL="$MUJOCO_GL" \
+            PYTHONPATH="$MUJOCO_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}" \
             "$PYTHON_BIN" experiments/evaluate_task3_mc.py \
                 --env-name=cube-triple-play-singletask-task3-v0 \
                 --native-checkpoint="$native_checkpoint" \
