@@ -73,7 +73,7 @@ context_checkpoint_for_seed() {
                     -type f \
                     -name "params_${EPOCH}.pkl" \
                     -path "*/${group}/*" \
-                    -printf '%T@ %p\n' \
+                    -printf '%T@ %h\n' \
                     | sort -n \
                     | tail -n 1 \
                     | cut -d' ' -f2-
