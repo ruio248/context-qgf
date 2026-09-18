@@ -156,3 +156,118 @@ exp/task3_diagnostics_v1/latent/seed*/latent_mean/result.json
 exp/task3_diagnostics_v1/latent/seed*/latent_sample/result.json
 exp/task3_diagnostics_v1/action_ordering/seed*/result.json
 ```
+
+## Follow-up diagnostics (v2)
+
+The initial action-ordering run reused the candidate index as the MC rollout
+index, so its repeated MC returns were not independent. This was fixed before
+the following runs.
+
+### Action ordering, corrected MC seeds
+
+| seed | Native Q accuracy | Context Q accuracy |
+|---:|---:|---:|
+| 1 | 46.67% | 53.33% |
+| 2 | 57.78% | 57.78% |
+| 3 | 42.22% | 55.56% |
+
+Average:
+
+```text
+Native Q:  48.89%
+Context Q: 55.56%
+```
+
+Context Q has a small ordering advantage on average, but the sample is small
+and the per-seed spread is large. This is suggestive, not conclusive.
+
+### Paired guidance intervention: native chunk versus Context-Q chunk
+
+At each query point the initial action-noise key is shared. Native Q guidance
+produces `a_N`; Context-Q guidance produces `a_C`. Both chunks are then
+continued with the same native continuation policy and the same continuation
+noise sequence.
+
+| seed | Return delta `G(a_C)-G(a_N)` | 95% CI | Success delta |
+|---:|---:|---|---:|
+| 1 | +26.25 | [-70.47, +124.56] | +3.75 pp |
+| 2 | -20.72 | [-115.77, +73.20] | -1.88 pp |
+| 3 | -44.69 | [-139.94, +28.62] | -9.38 pp |
+
+Average:
+
+```text
+Return delta:  -13.06
+Success delta: -2.50 pp
+```
+
+At the single-decision level, Context-Q guidance produces only a small average
+degradation. The large closed-loop gap therefore appears to accumulate across
+many decisions rather than being explained by a consistently terrible action
+at the audited early query points.
+
+### Context-off ablation on the trained Context-Q backbone
+
+The Context-Q checkpoint parameters are kept, but `context_ready` is forced to
+zero for the whole rollout. The actor is fixed to the native actor.
+
+| seed | Native success | Context backbone with context off | Delta |
+|---:|---:|---:|---:|
+| 1 | 70.00% | 3.33% | -66.67 pp |
+| 2 | 56.67% | 0.00% | -56.67 pp |
+| 3 | 43.33% | 0.00% | -43.33 pp |
+
+Average:
+
+```text
+Native:                          56.67%
+Context backbone with context off: 1.11%
+Delta:                           -55.56 pp
+```
+
+This is worse than the normal Context-Q result (`24.44%`). The context-trained
+critic backbone is therefore not equivalent to the native critic when context
+is disabled. This does not by itself prove the backbone is "bad": the backbone
+was trained with context active, so disabling context at inference is a
+distribution shift. It does show that the problem is not solely the current
+context input path.
+
+### Updated interpretation
+
+The follow-up results eliminate or weaken several remaining hypotheses:
+
+```text
+evaluator / parameter loading: ruled out
+zero-context fallback implementation: ruled out
+first-20-step startup: not the main cause
+posterior mean versus sampling: not the main cause
+single-step guidance intervention: only a small average effect
+```
+
+The main remaining hypothesis is a training-level issue:
+
+1. the Context-Q critic backbone is trained under a different value target or
+   context-conditional objective than native Q,
+2. the context-conditioned backbone does not reduce to a good native-equivalent
+   critic when context is unavailable,
+3. the degradation accumulates over the closed-loop horizon.
+
+The next decisive experiment is therefore a matched retraining comparison:
+
+```text
+keep original target semantics
+align native and Context-Q training random streams, data shards, batch indices,
+update count, and actor initialization
+train one matched seed for localization
+```
+
+After that, target-contract correction should be run as a separate factor, with
+native and Context-Q both trained under the corrected target.
+
+### v2 artifact locations
+
+```text
+exp/task3_diagnostics_v2/action_ordering/seed*/result.json
+exp/task3_diagnostics_v2/guidance_intervention/seed*/result.json
+exp/task3_diagnostics_v2/context_off/seed*/result.json
+```

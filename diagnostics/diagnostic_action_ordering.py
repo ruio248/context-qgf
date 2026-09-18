@@ -184,7 +184,7 @@ def main():
                         )
                     )
                     returns = []
-                    for _ in range(args.mc_rollouts):
+                    for rollout_index in range(args.mc_rollouts):
                         returns.append(
                             continuation_return(
                                 environment,
@@ -202,7 +202,7 @@ def main():
                                 episode=episode_index,
                                 query_transition=transition,
                                 max_transitions=args.max_transitions - transition,
-                                rollout_index=candidate_index,
+                                rollout_index=rollout_index,
                                 normalization=normalization,
                                 include_reward=include_reward,
                             )

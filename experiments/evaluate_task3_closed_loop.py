@@ -21,6 +21,7 @@ import jax
 import jax.numpy as jnp
 import mujoco
 import numpy as np
+from flax.core import FrozenDict
 
 from envs.env_utils import EpisodeMonitor
 from envs.ogbench_utils import make_ogbench_env_and_datasets
@@ -57,6 +58,14 @@ def parse_args():
         choices=["mean", "sample"],
         default="mean",
         help="Use the posterior mean or one posterior sample per action chunk.",
+    )
+    parser.add_argument(
+        "--context-off",
+        action="store_true",
+        help=(
+            "Keep Context-Q's trained critic backbone but force context_ready=0 "
+            "for the entire rollout."
+        ),
     )
     return parser.parse_args()
 
@@ -229,6 +238,10 @@ def main():
     context, context_flags = load_checkpoint(
         args.context_checkpoint, args.epoch, observation, action, contextual=True
     )
+    if args.context_off:
+        config = dict(context.config)
+        config["min_context_transitions"] = 10**9
+        context = context.replace(config=FrozenDict(config))
     if args.context_actor_source == "native":
         if jax.tree_util.tree_structure(native.policy.params) != jax.tree_util.tree_structure(
             context.policy.params
@@ -305,6 +318,7 @@ def main():
             "disable_multiccd": bool(args.disable_multiccd),
             "context_actor_source": args.context_actor_source,
             "latent_mode": args.latent_mode,
+            "context_off": bool(args.context_off),
             "native_flags_seed": native_flags["seed"],
             "context_flags_seed": context_flags["seed"],
         },
