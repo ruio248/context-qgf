@@ -17,6 +17,10 @@ MULTICCD_ARGS=()
 if [[ "${DISABLE_MULTICCD:-0}" == "1" ]]; then
   MULTICCD_ARGS+=(--disable-multiccd)
 fi
+ACTOR_ARGS=()
+if [[ "${CONTEXT_ACTOR_SOURCE:-context}" == "native" ]]; then
+  ACTOR_ARGS+=(--context-actor-source=native)
+fi
 
 PYTHONPATH="$MUJOCO_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}" \
 "$PYTHON_BIN" experiments/evaluate_task3_closed_loop.py \
@@ -27,4 +31,5 @@ PYTHONPATH="$MUJOCO_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}" \
   --output-dir="$OUTPUT_DIR" \
   --guidance-weight="${ALPHA:-0.04}" \
   --episodes="${EPISODES:-30}" \
-  "${MULTICCD_ARGS[@]}"
+  "${MULTICCD_ARGS[@]}" \
+  "${ACTOR_ARGS[@]}"

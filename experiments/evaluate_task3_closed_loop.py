@@ -43,6 +43,15 @@ def parse_args():
     parser.add_argument("--bootstrap-draws", type=int, default=20_000)
     parser.add_argument("--bootstrap-seed", type=int, default=20260918)
     parser.add_argument("--disable-multiccd", action="store_true")
+    parser.add_argument(
+        "--context-actor-source",
+        choices=["context", "native"],
+        default="context",
+        help=(
+            "Use the Context-Q actor, or copy the native QGF actor into the "
+            "Context-Q agent to isolate the Q-conditioning effect."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -213,6 +222,14 @@ def main():
     context, context_flags = load_checkpoint(
         args.context_checkpoint, args.epoch, observation, action, contextual=True
     )
+    if args.context_actor_source == "native":
+        if jax.tree_util.tree_structure(native.policy.params) != jax.tree_util.tree_structure(
+            context.policy.params
+        ):
+            raise ValueError("Native and Context-Q actor parameter trees differ")
+        context = context.replace(
+            policy=context.policy.replace(params=native.policy.params)
+        )
 
     before = {
         "native": tree_sha256(native.target_critic.params),
@@ -277,6 +294,7 @@ def main():
                 "action-noise keys for every episode"
             ),
             "disable_multiccd": bool(args.disable_multiccd),
+            "context_actor_source": args.context_actor_source,
             "native_flags_seed": native_flags["seed"],
             "context_flags_seed": context_flags["seed"],
         },
