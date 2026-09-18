@@ -19,9 +19,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import jax
 import jax.numpy as jnp
+import mujoco
 import numpy as np
 
-from experiments.evaluate_task3_mc import load_checkpoint, make_env, tree_sha256
+from envs.env_utils import EpisodeMonitor
+from envs.ogbench_utils import make_ogbench_env_and_datasets
+from experiments.evaluate_task3_mc import load_checkpoint, tree_sha256
 from utils.context import pad_context_numpy, transition_token_numpy
 from utils.evaluation import flatten
 
@@ -54,6 +57,29 @@ def action_key(base: int, episode: int, chunk: int):
     return jax.random.fold_in(jax.random.PRNGKey(integer), int(chunk))
 
 
+def make_paired_env(args):
+    environment = make_ogbench_env_and_datasets(args.env_name, env_only=True)
+    environment = EpisodeMonitor(
+        environment,
+        filter_regexes=[".*privileged.*", ".*proprio.*"],
+    )
+    if args.disable_multiccd:
+        environment.unwrapped.model.opt.disableflags |= int(
+            mujoco.mjtDisableBit.mjDSBL_MULTICCD
+        )
+
+    action_space = environment.unwrapped.action_space
+    base_class = type(environment.unwrapped)
+    paired_class = type(
+        f"PairedReset{base_class.__name__}",
+        (base_class,),
+        {"action_space": property(lambda self: self._paired_action_space)},
+    )
+    environment.unwrapped._paired_action_space = action_space
+    environment.unwrapped.__class__ = paired_class
+    return environment
+
+
 def nested_success(info):
     flat = flatten(info)
     if "success" in flat:
@@ -71,6 +97,7 @@ def rollout_episode(
     episode_seed,
     action_seed_base,
 ):
+    environment.unwrapped._paired_action_space.seed(episode_seed)
     observation, _ = environment.reset(
         seed=episode_seed, options={"task_id": None}
     )
@@ -173,7 +200,7 @@ def main():
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=False)
 
-    environment = make_env(args)
+    environment = make_paired_env(args)
     observation, _ = environment.reset(
         seed=args.episode_seed_base, options={"task_id": None}
     )
