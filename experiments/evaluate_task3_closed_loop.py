@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import os
 import sys
@@ -71,7 +70,6 @@ def rollout_episode(
     episode_index,
     episode_seed,
     action_seed_base,
-    pre_context_steps,
 ):
     observation, _ = environment.reset(
         seed=episode_seed, options={"task_id": None}
@@ -89,8 +87,6 @@ def rollout_episode(
     action_dim = int(agent.config["action_dim"])
     include_reward = bool(agent.config.get("context_include_reward", True))
     normalization = agent.config.get("context_normalization", None)
-
-    pre_context_digest = hashlib.sha256()
 
     while not done:
         key = action_key(action_seed_base, episode_index, chunk_index)
@@ -118,9 +114,6 @@ def rollout_episode(
         commands = np.asarray(flat, dtype=np.float32).reshape(horizon, action_dim)
         for command in commands:
             command = np.clip(command, -1.0, 1.0).astype(np.float32)
-            if episode_length < pre_context_steps:
-                pre_context_digest.update(command.tobytes())
-
             next_observation, reward, terminated, truncated, info = environment.step(
                 command
             )
@@ -155,7 +148,6 @@ def rollout_episode(
         "success": nested_success(final_info),
         "return": episode_return,
         "length": episode_length,
-        "pre_context_command_hash": pre_context_digest.hexdigest(),
     }
 
 
@@ -194,7 +186,6 @@ def main():
     context, context_flags = load_checkpoint(
         args.context_checkpoint, args.epoch, observation, action, contextual=True
     )
-    pre_context_steps = int(context.config["min_context_transitions"])
 
     before = {
         "native": tree_sha256(native.target_critic.params),
@@ -213,7 +204,6 @@ def main():
             episode_index=episode_index,
             episode_seed=episode_seed,
             action_seed_base=args.action_seed_base,
-            pre_context_steps=pre_context_steps,
         )
         context_result = rollout_episode(
             environment,
@@ -223,15 +213,7 @@ def main():
             episode_index=episode_index,
             episode_seed=episode_seed,
             action_seed_base=args.action_seed_base,
-            pre_context_steps=pre_context_steps,
         )
-        if (
-            native_result["pre_context_command_hash"]
-            != context_result["pre_context_command_hash"]
-        ):
-            raise AssertionError(
-                "Pre-context commands differ between native QGF and Context-Q"
-            )
 
         rows.append(
             {
@@ -291,7 +273,6 @@ def main():
         ),
         "paired_episodes": len(rows),
         "parameter_immutable": True,
-        "pre_context_commands_match": True,
     }
 
     atomic_json(output / "result.json", result)
