@@ -1,4 +1,7 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -7,8 +10,11 @@ from flax import traverse_util
 
 from agents.context_qgf import ContextQGFAgent
 from agents.context_qgf import get_config as get_context_config
+from agents.context_qgf_adapter import ContextQGFAdapterAgent
 from agents.qgf import QGFAgent
-from utils.flax_utils import target_update
+from agents.qgf_qv_finetune import QGFQVFinetuneAgent
+from utils.context_adapter import target_update_context_adapters, zero_context_inputs
+from utils.flax_utils import save_agent, target_update
 from utils.context import (
     CausalPearlEncoder,
     kl_to_standard_normal,
@@ -225,6 +231,184 @@ class ContextQGFAgentTest(unittest.TestCase):
         np.testing.assert_allclose(
             with_context, without_context, rtol=0, atol=1e-7
         )
+
+
+class ContextQGFAdapterAgentTest(unittest.TestCase):
+    def setUp(self):
+        self.config = small_config()
+        self.observations = jnp.zeros((4, 5), dtype=jnp.float32)
+        self.actions = jnp.zeros((4, 2), dtype=jnp.float32)
+        self.native = QGFAgent.create(
+            17, self.observations, self.actions, self.config
+        )
+        self.adapter = ContextQGFAdapterAgent.create(
+            29, self.observations, self.actions, self.config
+        ).initialize_from_native(self.native)
+
+    def batch(self):
+        rng = np.random.default_rng(11)
+        token_dim = int(self.adapter.config["context_token_dim"])
+        return {
+            "observations": rng.normal(size=(4, 5)).astype(np.float32),
+            "actions": rng.normal(size=(4, 1, 2)).astype(np.float32),
+            "next_observations": rng.normal(size=(4, 1, 5)).astype(np.float32),
+            "rewards": rng.normal(size=(4, 1)).astype(np.float32),
+            "masks": np.ones((4, 1), np.float32),
+            "terminals": np.zeros((4, 1), np.float32),
+            "valid": np.ones((4, 1), np.float32),
+            "context": rng.normal(size=(4, 3, token_dim)).astype(np.float32),
+            "context_mask": np.ones((4, 3), np.float32),
+            "next_context": rng.normal(size=(4, 3, token_dim)).astype(np.float32),
+            "next_context_mask": np.ones((4, 3), np.float32),
+        }
+
+    def test_transfer_is_equivalent_even_for_ready_nonzero_context(self):
+        rng = np.random.default_rng(31)
+        observations = jnp.asarray(rng.normal(size=(4, 5)), dtype=jnp.float32)
+        actions = jnp.asarray(rng.normal(size=(4, 2)), dtype=jnp.float32)
+        latent = jnp.asarray(rng.normal(size=(4, 4)), dtype=jnp.float32)
+        ready = jnp.ones((4,), dtype=jnp.float32)
+
+        native_q = self.native.target_critic(observations, actions)
+        adapter_q = self.adapter.target_critic(observations, actions, latent, ready)
+        np.testing.assert_allclose(adapter_q, native_q, rtol=0, atol=1e-7)
+        native_v = self.native.value(observations)
+        adapter_v = self.adapter.value(observations, None, latent, ready)
+        np.testing.assert_allclose(adapter_v, native_v, rtol=0, atol=1e-7)
+
+        def native_q_fn(candidate_action):
+            return self.native._aggregate_q(
+                self.native.target_critic(observations[:1], candidate_action[None])
+            )[0]
+
+        def adapter_q_fn(candidate_action):
+            return self.adapter._aggregate_q(
+                self.adapter.target_critic(
+                    observations[:1], candidate_action[None], latent[:1], ready[:1]
+                )
+            )[0]
+
+        native_grad = jax.grad(native_q_fn)(actions[0])
+        adapter_grad = jax.grad(adapter_q_fn)(actions[0])
+        np.testing.assert_allclose(adapter_grad, native_grad, rtol=0, atol=1e-7)
+
+        token_dim = int(self.adapter.config["context_token_dim"])
+        context = jnp.asarray(rng.normal(size=(3, token_dim)), dtype=jnp.float32)
+        mask = jnp.ones((3,), dtype=jnp.float32)
+        key = jax.random.PRNGKey(19)
+        native_action = self.native.sample_actions(
+            observations[0], seed=key, guidance_weight=0.04
+        )
+        adapter_action = self.adapter.sample_actions(
+            observations[0],
+            seed=key,
+            guidance_weight=0.04,
+            context=context,
+            context_mask=mask,
+            deterministic_latent=True,
+        )
+        np.testing.assert_allclose(adapter_action, native_action, rtol=0, atol=1e-7)
+        self.assertEqual(
+            tree_l1(
+                self.adapter.critic.params,
+                zero_context_inputs(self.adapter.critic.params),
+            ),
+            0.0,
+        )
+
+    def test_only_adapter_and_encoder_change_after_two_updates(self):
+        first, first_info = self.adapter.update(self.batch())
+        second, second_info = first.update(self.batch())
+        for value in {**first_info, **second_info}.values():
+            self.assertTrue(np.all(np.isfinite(np.asarray(value))))
+        self.assertEqual(
+            tree_l1(self.adapter.policy.params, second.policy.params), 0.0
+        )
+        self.assertEqual(
+            tree_l1(
+                self.adapter.critic.params,
+                second.critic.params,
+                exclude=("ContextInput",),
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            tree_l1(
+                self.adapter.value.params,
+                second.value.params,
+                exclude=("ContextInput",),
+            ),
+            0.0,
+        )
+        self.assertGreater(
+            tree_l1(self.adapter.critic.params, second.critic.params), 0.0
+        )
+        self.assertGreater(
+            tree_l1(
+                self.adapter.context_encoder.params,
+                second.context_encoder.params,
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            tree_l1(
+                self.adapter.target_critic.params,
+                first.target_critic.params,
+                exclude=("ContextInput",),
+            ),
+            0.0,
+        )
+        expected_target = target_update_context_adapters(
+            first.critic,
+            self.adapter.target_critic,
+            self.adapter.config["tau"],
+        )
+        self.assertEqual(
+            tree_l1(first.target_critic.params, expected_target.params), 0.0
+        )
+
+    def test_native_qv_control_freezes_policy_and_tracks_new_critic(self):
+        control = QGFQVFinetuneAgent.create(
+            17, self.observations, self.actions, self.config
+        )
+        control = control.replace(
+            policy=control.policy.replace(params=self.native.policy.params),
+            critic=control.critic.replace(params=self.native.critic.params),
+            target_critic=control.target_critic.replace(
+                params=self.native.target_critic.params
+            ),
+            value=control.value.replace(params=self.native.value.params),
+        )
+        updated, _ = control.update(self.batch())
+        self.assertEqual(tree_l1(control.policy.params, updated.policy.params), 0.0)
+        self.assertGreater(tree_l1(control.critic.params, updated.critic.params), 0.0)
+        expected_target = target_update(
+            updated.critic, control.target_critic, control.config["tau"]
+        )
+        self.assertLess(
+            tree_l1(updated.target_critic.params, expected_target.params), 1e-6
+        )
+
+    def test_adapter_checkpoint_uses_adapter_class_in_shared_evaluator_loader(self):
+        from experiments.evaluate_task3_mc import load_checkpoint
+
+        config = small_config()
+        config.agent_name = "context_qgf_adapter"
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory)
+            save_agent(self.adapter, checkpoint, 9)
+            checkpoint.joinpath("flags.json").write_text(
+                json.dumps({"seed": 29, "agent": config.to_dict()})
+            )
+            loaded, _ = load_checkpoint(
+                checkpoint,
+                9,
+                self.observations[0],
+                self.actions[0],
+                contextual=True,
+            )
+        self.assertIsInstance(loaded, ContextQGFAdapterAgent)
+        self.assertEqual(loaded.config["agent_name"], "context_qgf_adapter")
 
 
 if __name__ == "__main__":

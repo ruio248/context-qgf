@@ -2,10 +2,19 @@ import unittest
 
 import numpy as np
 
-from utils.datasets import Dataset
+from utils.datasets import Dataset, deterministic_sequence_indices
 
 
 class ContextDatasetTest(unittest.TestCase):
+    def test_deterministic_sequence_indices_depend_only_on_seed_and_step(self):
+        first = deterministic_sequence_indices(100, 5, 16, seed=7, global_step=500_001)
+        second = deterministic_sequence_indices(100, 5, 16, seed=7, global_step=500_001)
+        later = deterministic_sequence_indices(100, 5, 16, seed=7, global_step=500_002)
+        np.testing.assert_array_equal(first, second)
+        self.assertTrue(np.all(first >= 0))
+        self.assertTrue(np.all(first <= 95))
+        self.assertFalse(np.array_equal(first, later))
+
     def test_history_is_causal_and_stops_at_episode_boundary(self):
         observations = np.arange(8, dtype=np.float32)[:, None]
         dataset = Dataset.create(

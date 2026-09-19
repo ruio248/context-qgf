@@ -216,6 +216,7 @@ def _resolve_checkpoint_dir_from_glob(restore_path_glob: str) -> str:
     If multiple directories match, picks the first after lexicographic sort so
     choice is stable across machines and runs.
     """
+    restore_path_glob = os.fspath(restore_path_glob)
     candidates = glob.glob(restore_path_glob)
     if not candidates:
         raise FileNotFoundError(

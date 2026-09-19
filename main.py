@@ -20,7 +20,12 @@ from agents import agents
 from envs.env_utils import make_env_and_datasets
 from envs.ogbench_utils import make_ogbench_env_and_datasets
 from ml_collections import config_flags
-from utils.datasets import Dataset, ReplayBuffer, load_replay_buffer
+from utils.datasets import (
+    Dataset,
+    ReplayBuffer,
+    deterministic_sequence_indices,
+    load_replay_buffer,
+)
 from utils.context import pad_context_numpy, transition_token_numpy
 from utils.evaluation import eval_standard, eval_with_test_time_guidance, flatten
 from utils.flax_utils import restore_agent, save_agent
@@ -53,6 +58,16 @@ flags.DEFINE_boolean(
 flags.DEFINE_string("save_dir", "exp/", "Save directory.")
 flags.DEFINE_string("restore_path", None, "Restore path.")
 flags.DEFINE_integer("restore_epoch", 0, "Restore epoch.")
+flags.DEFINE_string(
+    "native_adapter_restore_path",
+    None,
+    "Native QGF checkpoint used to initialize a Context-Q adapter agent.",
+)
+flags.DEFINE_integer(
+    "native_adapter_restore_epoch",
+    0,
+    "Epoch of the native QGF checkpoint used for adapter initialization.",
+)
 
 # training
 flags.DEFINE_integer("buffer_size", 2000000, "Replay buffer size.")
@@ -108,6 +123,11 @@ flags.DEFINE_integer(
     1000,
     "Steps between dataset slice swaps (0 = disabled).",
 )
+flags.DEFINE_boolean(
+    "deterministic_batch_indices",
+    False,
+    "Sample offline batch indices deterministically from (seed, global step).",
+)
 
 
 @dataclass
@@ -122,6 +142,27 @@ class DataSetup:
     replay_buffer: object
     vec_eval_env: object | None
     example_batch: dict
+
+
+def _training_start_step():
+    """Return the global offline step represented by the initial parameters."""
+
+    if FLAGS.native_adapter_restore_path is not None:
+        if FLAGS.restore_path is not None:
+            raise ValueError(
+                "--native_adapter_restore_path and --restore_path are mutually exclusive"
+            )
+        if FLAGS.native_adapter_restore_epoch <= 0:
+            raise ValueError(
+                "--native_adapter_restore_epoch must be positive when restoring native QGF"
+            )
+        if FLAGS.restore_epoch != FLAGS.native_adapter_restore_epoch:
+            raise ValueError(
+                "--restore_epoch must equal --native_adapter_restore_epoch so the "
+                "offline loop and shard schedule begin at the native checkpoint step"
+            )
+        return FLAGS.native_adapter_restore_epoch
+    return FLAGS.restore_epoch if FLAGS.restore_path is not None else 0
 
 
 def _is_test_time_guidance_agent(agent) -> bool:
@@ -168,13 +209,20 @@ def _setup_data(config):
         assert (
             FLAGS.dataset_replace_interval != 0
         ), "dataset_replace_interval must be nonzero for large OGBench datasets"
-        dataset_idx = 0
         dataset_paths = sorted(
             [
                 f
                 for f in glob.glob(f"{FLAGS.ogbench_dataset_dir}/*.npz")
                 if "-val.npz" not in f
             ]
+        )
+        if not dataset_paths:
+            raise FileNotFoundError(
+                f"No training .npz slices found in {FLAGS.ogbench_dataset_dir!r}"
+            )
+        start_step = _training_start_step()
+        dataset_idx = (
+            (start_step // FLAGS.dataset_replace_interval) % len(dataset_paths)
         )
         env, eval_env, train_dataset, val_dataset = make_ogbench_env_and_datasets(
             FLAGS.env_name,
@@ -266,18 +314,29 @@ def _setup_data(config):
     )
 
 
-def _sample_training_batch(dataset, config, batch_size):
+def _sample_training_batch(dataset, config, batch_size, *, global_step=None):
+    idxs = None
+    if FLAGS.deterministic_batch_indices and global_step is not None:
+        idxs = deterministic_sequence_indices(
+            dataset.size,
+            config["horizon_length"],
+            batch_size,
+            FLAGS.seed,
+            global_step,
+        )
     if int(config.get("context_length", 0)) > 0:
         return dataset.sample_context_sequence(
             batch_size,
             sequence_length=config["horizon_length"],
             context_length=config["context_length"],
             discount=config["discount"],
+            idxs=idxs,
         )
     return dataset.sample_sequence(
         batch_size,
         sequence_length=config["horizon_length"],
         discount=config["discount"],
+        idxs=idxs,
     )
 
 
@@ -290,8 +349,36 @@ def _setup_agents(config, agent_name, example_batch):
         config,
     )
 
-    # Restore agent
-    if FLAGS.restore_path:
+    # Transfer a native checkpoint into an adapter agent.  This is deliberately
+    # separate from generic restore_agent: native QGF has no ContextInput or
+    # encoder parameter leaves, so direct deserialization is not a valid
+    # adapter initialization.
+    if FLAGS.native_adapter_restore_path:
+        native_agent = agents["qgf"].create(
+            FLAGS.seed,
+            example_batch["observations"],
+            example_batch["actions"],
+            config,
+        )
+        native_agent = restore_agent(
+            native_agent,
+            FLAGS.native_adapter_restore_path,
+            FLAGS.native_adapter_restore_epoch,
+        )
+        initialize_from_native = getattr(agent, "initialize_from_native", None)
+        if initialize_from_native is None:
+            raise TypeError(
+                "--native_adapter_restore_path requires an agent with "
+                "initialize_from_native(), such as context_qgf_adapter"
+            )
+        agent = initialize_from_native(native_agent)
+        print(
+            "Initialized Context-Q adapter from native QGF "
+            f"{FLAGS.native_adapter_restore_path} at epoch "
+            f"{FLAGS.native_adapter_restore_epoch}"
+        )
+    # Restore an agent of the same architecture, e.g. resume an adapter run.
+    elif FLAGS.restore_path:
         agent = restore_agent(agent, FLAGS.restore_path, FLAGS.restore_epoch)
         print(
             f"Restored agent from {FLAGS.restore_path} at epoch {FLAGS.restore_epoch}"
@@ -457,7 +544,12 @@ def main(_):
                 train_dataset = _configure_context_dataset(train_dataset, config)
 
             # sample batch and update
-            batch = _sample_training_batch(train_dataset, config, config["batch_size"])
+            batch = _sample_training_batch(
+                train_dataset,
+                config,
+                config["batch_size"],
+                global_step=i,
+            )
             agent, update_info = agent.update(batch)
         else:
 

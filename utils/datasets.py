@@ -15,6 +15,33 @@ def get_size(data):
     return max(jax.tree_util.tree_leaves(sizes))
 
 
+def deterministic_sequence_indices(
+    dataset_size, sequence_length, batch_size, seed, global_step
+):
+    """Return reproducible sequence starts keyed only by seed and global step.
+
+    Keeping this independent of NumPy's process-global RNG prevents validation
+    logging, evaluator calls, or Context-Q-only bookkeeping from changing the
+    training samples.  Native and contextual arms can therefore consume the
+    exact same underlying transition windows.
+    """
+
+    maximum_start = int(dataset_size) - int(sequence_length) + 1
+    if maximum_start <= 0:
+        raise ValueError(
+            "Dataset is shorter than the requested sequence_length: "
+            f"size={dataset_size}, sequence_length={sequence_length}"
+        )
+    generator = np.random.default_rng(
+        np.random.SeedSequence(
+            [int(seed) % (2**32), int(global_step) % (2**32)]
+        )
+    )
+    return generator.integers(
+        0, maximum_start, size=int(batch_size), dtype=np.int64
+    )
+
+
 @partial(jax.jit, static_argnames=("padding",))
 def random_crop(img, crop_from, padding):
     """Randomly crop an image.

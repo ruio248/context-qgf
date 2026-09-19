@@ -30,7 +30,6 @@ import jax.numpy as jnp
 import mujoco
 import numpy as np
 
-from agents.context_qgf import ContextQGFAgent
 from agents.qgf import QGFAgent
 from envs.env_utils import EpisodeMonitor
 from envs.ogbench_utils import make_ogbench_env_and_datasets
@@ -82,14 +81,30 @@ def load_checkpoint(path, epoch, observation, action, *, contextual):
     flags = json.loads((Path(path) / "flags.json").read_text())
     # Importing get_config through the module keeps this script compatible with
     # ml_collections ConfigDict serialization in main.py.
-    from agents.context_qgf import get_config as get_context_config
     from agents.qgf import get_config as get_qgf_config
+
+    stored_agent_name = flags["agent"].get("agent_name")
+    if contextual and stored_agent_name == "context_qgf_adapter":
+        from agents.context_qgf_adapter import ContextQGFAdapterAgent
+        from agents.context_qgf_adapter import get_config as get_context_config
+
+        agent_cls = ContextQGFAdapterAgent
+        expected_agent_name = "context_qgf_adapter"
+    elif contextual:
+        from agents.context_qgf import ContextQGFAgent
+        from agents.context_qgf import get_config as get_context_config
+
+        agent_cls = ContextQGFAgent
+        expected_agent_name = "context_qgf"
+    else:
+        get_context_config = None
+        agent_cls = QGFAgent
+        expected_agent_name = "qgf"
 
     config = get_context_config() if contextual else get_qgf_config()
     for key, value in flags["agent"].items():
         config[key] = value
-    config.agent_name = "context_qgf" if contextual else "qgf"
-    agent_cls = ContextQGFAgent if contextual else QGFAgent
+    config.agent_name = expected_agent_name
     agent = agent_cls.create(
         int(flags["seed"]), observation[None], action[None], config
     )
