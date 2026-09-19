@@ -271,3 +271,68 @@ exp/task3_diagnostics_v2/action_ordering/seed*/result.json
 exp/task3_diagnostics_v2/guidance_intervention/seed*/result.json
 exp/task3_diagnostics_v2/context_off/seed*/result.json
 ```
+
+## MC at alpha=0: pure actor rollout
+
+The two-by-two MC matrix was rerun with:
+
+```text
+alpha = 0.0
+query rollout = native actor only, no Q guidance
+continuation = same alpha=0 policy for the corresponding target
+```
+
+### Native continuation target
+
+| seed | Q_native MAE | Q_context MAE | Delta |
+|---:|---:|---:|---:|
+| 1 | 572.58 | 743.87 | +171.29 |
+| 2 | 564.84 | 751.17 | +186.33 |
+| 3 | 547.53 | 765.14 | +217.61 |
+
+Average:
+
+```text
+Q_native MAE:  561.65
+Q_context MAE: 753.39
+Delta:         +191.74  (positive favors native Q)
+```
+
+### Context continuation target
+
+| seed | Q_native MAE | Q_context MAE | Delta |
+|---:|---:|---:|---:|
+| 1 | 571.37 | 742.67 | +171.29 |
+| 2 | 563.60 | 749.92 | +186.33 |
+| 3 | 548.48 | 766.09 | +217.61 |
+
+Average:
+
+```text
+Q_native MAE:  561.15
+Q_context MAE: 752.89
+Delta:         +191.74  (positive favors native Q)
+```
+
+### Interpretation
+
+At `alpha=0`, the query distribution is a pure actor/BC rollout rather than a
+native Q-guided rollout. Under that distribution, Context-Q is substantially
+**worse** than native Q under both continuation targets, and all per-seed
+deltas are positive with CIs above zero.
+
+This is a major qualification of the earlier MC result:
+
+```text
+alpha=0.04, native Q-guided queries: Context-Q had lower MAE
+alpha=0.00, pure actor queries:      Context-Q has much higher MAE
+```
+
+The earlier MC advantage is therefore strongly distribution-dependent. It does
+not establish that Context-Q is a globally better value function.
+
+### Artifacts
+
+```text
+exp/task3_mc_matrix_alpha000/matrix_seed*/result.json
+```
