@@ -99,6 +99,18 @@ def context_is_ready(mask, reference, min_count=1):
     return (jnp.sum(mask, axis=-1) >= min_count).astype(reference.dtype)
 
 
+def context_is_ready_numpy(mask, min_count=1, *, dtype=np.float32):
+    """NumPy counterpart of :func:`context_is_ready` for rollout diagnostics.
+
+    Keeping the diagnostic gate in one place prevents an accidental
+    ``ready=1`` from querying a contextual critic before its configured
+    minimum number of completed transitions is available.
+    """
+
+    mask = np.asarray(mask)
+    return (np.sum(mask, axis=-1) >= min_count).astype(dtype)
+
+
 def _normalization_arrays(normalization: Mapping, dtype):
     return {
         key: np.asarray(value, dtype=dtype)

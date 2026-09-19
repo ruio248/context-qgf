@@ -30,6 +30,12 @@ from utils.context import pad_context_numpy, transition_token_numpy
 from utils.evaluation import eval_standard, eval_with_test_time_guidance, flatten
 from utils.flax_utils import restore_agent, save_agent
 from utils.log_utils import CsvLogger, get_flag_dict, get_wandb_video, setup_wandb
+from utils.native_transfer import (
+    adapter_initialization_audit,
+    assert_transfer_compatible,
+    load_native_qgf_config,
+    source_backbone_finetune_config,
+)
 
 FLAGS = flags.FLAGS
 
@@ -354,11 +360,20 @@ def _setup_agents(config, agent_name, example_batch):
     # encoder parameter leaves, so direct deserialization is not a valid
     # adapter initialization.
     if FLAGS.native_adapter_restore_path:
+        source_config, source_flags = load_native_qgf_config(
+            FLAGS.native_adapter_restore_path
+        )
+        compatibility = assert_transfer_compatible(
+            source_config,
+            config,
+            source_flags,
+            get_flag_dict(),
+        )
         native_agent = agents["qgf"].create(
-            FLAGS.seed,
+            int(source_flags["seed"]),
             example_batch["observations"],
             example_batch["actions"],
-            config,
+            source_config,
         )
         native_agent = restore_agent(
             native_agent,
@@ -372,12 +387,59 @@ def _setup_agents(config, agent_name, example_batch):
                 "initialize_from_native(), such as context_qgf_adapter"
             )
         agent = initialize_from_native(native_agent)
+        audit = adapter_initialization_audit(
+            native_agent,
+            agent,
+            example_batch,
+            source_checkpoint=FLAGS.native_adapter_restore_path,
+            source_epoch=FLAGS.native_adapter_restore_epoch,
+            compatibility=compatibility,
+        )
+        audit_path = os.path.join(FLAGS.save_dir, "adapter_init_audit.json")
+        with open(audit_path, "w") as stream:
+            json.dump(audit, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+        initial_checkpoint = os.path.join(
+            FLAGS.save_dir, f"params_{FLAGS.native_adapter_restore_epoch}.pkl"
+        )
+        if os.path.exists(initial_checkpoint):
+            raise FileExistsError(
+                "Refusing to overwrite an adapter initialization checkpoint: "
+                f"{initial_checkpoint}"
+            )
+        save_agent(agent, FLAGS.save_dir, FLAGS.native_adapter_restore_epoch)
         print(
             "Initialized Context-Q adapter from native QGF "
             f"{FLAGS.native_adapter_restore_path} at epoch "
-            f"{FLAGS.native_adapter_restore_epoch}"
+            f"{FLAGS.native_adapter_restore_epoch}; audit={audit_path}"
         )
     # Restore an agent of the same architecture, e.g. resume an adapter run.
+    elif FLAGS.restore_path and agent_name == "qgf_qv_finetune":
+        # The matched native Q/V continuation must deserialize the original
+        # native model using its own flags, not a manually retyped destination
+        # config.  Only optimizer controls explicitly whitelisted above may
+        # differ for this new continuation stage.
+        source_config, source_flags = load_native_qgf_config(FLAGS.restore_path)
+        assert_transfer_compatible(
+            source_config,
+            config,
+            source_flags,
+            get_flag_dict(),
+        )
+        qv_config = source_backbone_finetune_config(
+            source_config, config, agent_name="qgf_qv_finetune"
+        )
+        agent = agents[agent_name].create(
+            int(source_flags["seed"]),
+            example_batch["observations"],
+            example_batch["actions"],
+            qv_config,
+        )
+        agent = restore_agent(agent, FLAGS.restore_path, FLAGS.restore_epoch)
+        print(
+            "Initialized native Q/V continuation from source QGF flags at "
+            f"{FLAGS.restore_path} epoch {FLAGS.restore_epoch}"
+        )
     elif FLAGS.restore_path:
         agent = restore_agent(agent, FLAGS.restore_path, FLAGS.restore_epoch)
         print(

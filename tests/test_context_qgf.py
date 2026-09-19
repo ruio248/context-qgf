@@ -12,9 +12,15 @@ from agents.context_qgf import ContextQGFAgent
 from agents.context_qgf import get_config as get_context_config
 from agents.context_qgf_adapter import ContextQGFAdapterAgent
 from agents.qgf import QGFAgent
+from agents.qgf import get_config as get_qgf_config
 from agents.qgf_qv_finetune import QGFQVFinetuneAgent
 from utils.context_adapter import target_update_context_adapters, zero_context_inputs
 from utils.flax_utils import save_agent, target_update
+from utils.native_transfer import (
+    adapter_initialization_audit,
+    assert_transfer_compatible,
+    source_backbone_finetune_config,
+)
 from utils.context import (
     CausalPearlEncoder,
     kl_to_standard_normal,
@@ -315,6 +321,58 @@ class ContextQGFAdapterAgentTest(unittest.TestCase):
             ),
             0.0,
         )
+
+    def test_transfer_audit_records_zero_adapter_checkpoint_provenance(self):
+        example_batch = {
+            "observations": np.zeros((1, 5), dtype=np.float32),
+            "actions": np.zeros((1, 2), dtype=np.float32),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory)
+            save_agent(self.native, checkpoint, 500_000)
+            checkpoint.joinpath("flags.json").write_text("{}\n")
+            audit = adapter_initialization_audit(
+                self.native,
+                self.adapter,
+                example_batch,
+                source_checkpoint=checkpoint,
+                source_epoch=500_000,
+                compatibility={"semantic_mismatches": {}},
+            )
+        self.assertEqual(audit["context_input_abs_max"], 0.0)
+        self.assertTrue(audit["copied_hashes_match"])
+        self.assertLessEqual(audit["equivalence_max_abs"]["target_q_max_abs"], 2e-6)
+
+    def test_native_transfer_rejects_semantic_mismatch_but_allows_new_optimizer(self):
+        source = get_qgf_config()
+        source.actor_hidden_dims = self.config.actor_hidden_dims
+        source.value_network_kwargs.hidden_dims = self.config.value_network_kwargs.hidden_dims
+        source.denoise_steps = self.config.denoise_steps
+        source.horizon_length = self.config.horizon_length
+        source.action_chunking = self.config.action_chunking
+        destination = self.config.copy_and_resolve_references()
+        compatibility = assert_transfer_compatible(
+            source,
+            destination,
+            {"env_name": "test", "reward_scale": 1.0, "reward_bias": 0.0, "sparse": False},
+            {"env_name": "test", "reward_scale": 1.0, "reward_bias": 0.0, "sparse": False},
+        )
+        self.assertEqual(compatibility["semantic_mismatches"], {})
+        destination.activation = "relu"
+        with self.assertRaisesRegex(ValueError, "incompatible semantics"):
+            assert_transfer_compatible(
+                source,
+                destination,
+                {"env_name": "test", "reward_scale": 1.0, "reward_bias": 0.0, "sparse": False},
+                {"env_name": "test", "reward_scale": 1.0, "reward_bias": 0.0, "sparse": False},
+            )
+        destination.activation = source.activation
+        destination.critic_lr = 1e-5
+        qv = source_backbone_finetune_config(
+            source, destination, agent_name="qgf_qv_finetune"
+        )
+        self.assertEqual(qv["agent_name"], "qgf_qv_finetune")
+        self.assertEqual(qv["critic_lr"], 1e-5)
 
     def test_only_adapter_and_encoder_change_after_two_updates(self):
         first, first_info = self.adapter.update(self.batch())

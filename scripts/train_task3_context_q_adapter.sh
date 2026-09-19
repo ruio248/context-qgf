@@ -20,6 +20,7 @@ NATIVE_EPOCH="${NATIVE_EPOCH:-500000}"
 FINETUNE_STEPS="${FINETUNE_STEPS:-30000}"
 OFFLINE_STEPS="$((NATIVE_EPOCH + FINETUNE_STEPS))"
 MUJOCO_PYTHONPATH="${MUJOCO_PYTHONPATH:-/home/lrh/qgf-native/mujoco_alt_381}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 
 if [[ ! -f "${NATIVE_CHECKPOINT}/params_${NATIVE_EPOCH}.pkl" ]]; then
   echo "Missing native checkpoint: ${NATIVE_CHECKPOINT}/params_${NATIVE_EPOCH}.pkl" >&2
@@ -27,7 +28,7 @@ if [[ ! -f "${NATIVE_CHECKPOINT}/params_${NATIVE_EPOCH}.pkl" ]]; then
 fi
 
 cd "$ROOT"
-PYTHONPATH="$MUJOCO_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}" exec python main.py \
+PYTHONPATH="$MUJOCO_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}" exec "$PYTHON_BIN" main.py \
   --agent=agents/context_qgf_adapter.py \
   --env_name=cube-triple-play-singletask-task3-v0 \
   --ogbench_dataset_dir="${DATASET_DIR}/cube-triple-play-100m-v0/" \

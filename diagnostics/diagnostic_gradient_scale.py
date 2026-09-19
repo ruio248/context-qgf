@@ -17,20 +17,28 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from experiments.checkpoint_protocol import (
+    add_paired_checkpoint_epochs,
+    paired_checkpoint_epochs,
+)
 from experiments.evaluate_task3_closed_loop import action_key, make_paired_env
 from experiments.evaluate_task3_mc import (
     base_action,
     execute_chunk,
     load_checkpoint,
 )
-from utils.context import pad_context_numpy, transition_token_numpy
+from utils.context import (
+    context_is_ready_numpy,
+    pad_context_numpy,
+    transition_token_numpy,
+)
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--native-checkpoint", required=True)
     parser.add_argument("--context-checkpoint", required=True)
-    parser.add_argument("--epoch", type=int, default=500_000)
+    add_paired_checkpoint_epochs(parser)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--env-name", default="cube-triple-play-singletask-task3-v0")
     parser.add_argument("--guidance-weight", type=float, default=0.04)
@@ -77,11 +85,12 @@ def main():
     observation = np.asarray(observation, dtype=np.float32).reshape(-1)
     action = np.zeros(environment.action_space.shape, dtype=np.float32)
 
+    native_epoch, context_epoch = paired_checkpoint_epochs(args)
     native, _ = load_checkpoint(
-        args.native_checkpoint, args.epoch, observation, action, contextual=False
+        args.native_checkpoint, native_epoch, observation, action, contextual=False
     )
     context, _ = load_checkpoint(
-        args.context_checkpoint, args.epoch, observation, action, contextual=True
+        args.context_checkpoint, context_epoch, observation, action, contextual=True
     )
     minimum = int(context.config["min_context_transitions"])
     normalization = context.config.get("context_normalization", None)
@@ -115,7 +124,11 @@ def main():
                     jnp.asarray(context_mask)[None],
                 )
                 mean = np.asarray(mean, dtype=np.float32)
-                ready = np.asarray([1.0], dtype=np.float32)
+                ready = context_is_ready_numpy(
+                    context_mask,
+                    int(context.config["min_context_transitions"]),
+                    dtype=np.float32,
+                )
 
                 full_action_dim = int(native.config["action_dim"]) * int(
                     native.config["horizon_length"]

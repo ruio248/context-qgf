@@ -9,6 +9,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT_DIR="${1:?Provide an output directory}"
 NATIVE_CHECKPOINT="${NATIVE_CHECKPOINT:?Set NATIVE_CHECKPOINT to a native QGF run}"
 CONTEXT_CHECKPOINT="${CONTEXT_CHECKPOINT:?Set CONTEXT_CHECKPOINT to a Context-Q run}"
+NATIVE_EPOCH="${NATIVE_EPOCH:-${EPOCH:-500000}}"
+CONTEXT_EPOCH="${CONTEXT_EPOCH:-${EPOCH:-500000}}"
 
 cd "$ROOT"
 MULTICCD_ARGS=()
@@ -19,7 +21,8 @@ exec python experiments/evaluate_task3_mc.py \
   --env-name=cube-triple-play-singletask-task3-v0 \
   --native-checkpoint="$NATIVE_CHECKPOINT" \
   --context-checkpoint="$CONTEXT_CHECKPOINT" \
-  --epoch="${EPOCH:-500000}" \
+  --native-epoch="$NATIVE_EPOCH" \
+  --context-epoch="$CONTEXT_EPOCH" \
   --output-dir="$OUTPUT_DIR" \
   --guidance-weight="${ALPHA:-0.04}" \
   --episodes="${EPISODES:-10}" \

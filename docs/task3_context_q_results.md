@@ -1,5 +1,10 @@
 # Task3 Context-Q evaluation report
 
+> **Status:** This document records the older from-scratch Context-Q study.
+> Its MC continuation and C-norm-related diagnostics are not the primary
+> protocol for `finetune/context-q-adapter`, and its numbers must not be used
+> as evidence for the new 500k / 530k / 530k three-arm adapter comparison.
+
 ## Scope
 
 This report summarizes the current Task3 evaluation results for:

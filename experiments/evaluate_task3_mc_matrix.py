@@ -39,7 +39,15 @@ from experiments.evaluate_task3_mc import (
     restore_physics_state,
     tree_sha256,
 )
-from utils.context import pad_context_numpy, transition_token_numpy
+from experiments.checkpoint_protocol import (
+    add_paired_checkpoint_epochs,
+    paired_checkpoint_epochs,
+)
+from utils.context import (
+    context_is_ready_numpy,
+    pad_context_numpy,
+    transition_token_numpy,
+)
 
 
 def parse_args():
@@ -47,7 +55,7 @@ def parse_args():
     parser.add_argument("--env-name", default="cube-triple-play-singletask-task3-v0")
     parser.add_argument("--native-checkpoint", required=True)
     parser.add_argument("--context-checkpoint", required=True)
-    parser.add_argument("--epoch", type=int, default=500_000)
+    add_paired_checkpoint_epochs(parser)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--guidance-weight", type=float, default=0.04)
     parser.add_argument("--episodes", type=int, default=10)
@@ -250,11 +258,12 @@ def main():
     observation = np.asarray(observation, dtype=np.float32).reshape(-1)
     action = np.zeros(environment.action_space.shape, dtype=np.float32)
 
+    native_epoch, context_epoch = paired_checkpoint_epochs(args)
     native, native_flags = load_checkpoint(
-        args.native_checkpoint, args.epoch, observation, action, contextual=False
+        args.native_checkpoint, native_epoch, observation, action, contextual=False
     )
     context, context_flags = load_checkpoint(
-        args.context_checkpoint, args.epoch, observation, action, contextual=True
+        args.context_checkpoint, context_epoch, observation, action, contextual=True
     )
     discount = float(context.config["discount"])
     minimum = int(context.config["min_context_transitions"])
@@ -294,7 +303,7 @@ def main():
                     jnp.asarray(context_mask)[None],
                 )
                 mean = np.asarray(mean, dtype=np.float32)
-                ready = np.asarray([1.0], dtype=np.float32)
+                ready = context_is_ready_numpy(context_mask, minimum, dtype=np.float32)
 
                 flat_action = commands.reshape(-1)
                 native_returns = []
@@ -400,6 +409,8 @@ def main():
             "query_transitions": list(args.query_transitions),
             "mc_rollouts": args.mc_rollouts,
             "alpha": args.guidance_weight,
+            "native_epoch": native_epoch,
+            "context_epoch": context_epoch,
             "native_continuation": "frozen native QGF with the same alpha and seeds",
             "context_continuation": "Context-Q with causal history and the same alpha and seeds",
             "disable_multiccd": bool(args.disable_multiccd),

@@ -2,10 +2,18 @@ import unittest
 
 import numpy as np
 
+from utils.context import context_is_ready_numpy
 from utils.datasets import Dataset, deterministic_sequence_indices
 
 
 class ContextDatasetTest(unittest.TestCase):
+    def test_numpy_ready_gate_matches_minimum_completed_transitions(self):
+        mask = np.array([[0, 0, 1, 1], [0, 1, 1, 1]], dtype=np.float32)
+        np.testing.assert_array_equal(
+            context_is_ready_numpy(mask, min_count=3),
+            np.array([0.0, 1.0], dtype=np.float32),
+        )
+
     def test_deterministic_sequence_indices_depend_only_on_seed_and_step(self):
         first = deterministic_sequence_indices(100, 5, 16, seed=7, global_step=500_001)
         second = deterministic_sequence_indices(100, 5, 16, seed=7, global_step=500_001)

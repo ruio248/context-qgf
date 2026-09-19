@@ -22,6 +22,10 @@ from diagnostics.common import (
     max_abs_diff,
     zero_context_inputs,
 )
+from experiments.checkpoint_protocol import (
+    add_paired_checkpoint_epochs,
+    paired_checkpoint_epochs,
+)
 from experiments.evaluate_task3_mc import load_checkpoint
 from utils.evaluation import run_episodes
 
@@ -30,7 +34,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--native-checkpoint", required=True)
     parser.add_argument("--context-checkpoint", required=True)
-    parser.add_argument("--epoch", type=int, default=500_000)
+    add_paired_checkpoint_epochs(parser)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--env-name", default="cube-triple-play-singletask-task3-v0")
     parser.add_argument("--episode-seed", type=int, default=72_000_000)
@@ -104,11 +108,12 @@ def main():
     observation = np.asarray(observation, dtype=np.float32).reshape(-1)
     action = np.zeros(environment.action_space.shape, dtype=np.float32)
 
+    native_epoch, context_epoch = paired_checkpoint_epochs(args)
     native, _ = load_checkpoint(
-        args.native_checkpoint, args.epoch, observation, action, contextual=False
+        args.native_checkpoint, native_epoch, observation, action, contextual=False
     )
     context, _ = load_checkpoint(
-        args.context_checkpoint, args.epoch, observation, action, contextual=True
+        args.context_checkpoint, context_epoch, observation, action, contextual=True
     )
     hybrid = make_zero_context_agent(native, context)
 
