@@ -442,3 +442,25 @@ replace its per-query norm with the native norm
 The C-norm implementation has been added, but its unoptimized custom denoising
 loop is too slow for the full 30-episode paired run and still needs JIT
 optimization.
+
+### C-norm pilot (5 episodes per seed)
+
+| seed | Native success | C-norm Context success | Delta |
+|---:|---:|---:|---:|
+| 1 | 80.00% | 40.00% | -40.00 pp |
+| 2 | 60.00% | 60.00% | 0.00 pp |
+| 3 | 20.00% | 40.00% | +20.00 pp |
+
+Average:
+
+```text
+Native:          53.33%
+C-norm Context:  46.67%
+Delta:           -6.67 pp
+```
+
+This is substantially smaller than the normal Context-Q closed-loop gap of
+approximately -32 to -36 pp. The pilot therefore supports the hypothesis that a
+meaningful part of the degradation comes from gradient-scale mismatch, not only
+from gradient direction. A larger 30-episode run is still needed before making
+a final claim.

@@ -47,25 +47,22 @@ def atomic_json(path, value):
     os.replace(temporary, path)
 
 
+@jax.jit
 def sample_cnorm_chunk(
     native_agent,
     context_agent,
     observation,
     key,
     alpha,
-    history,
+    context_tokens,
+    context_mask,
+    mean,
+    ready,
 ):
-    context_tokens, context_mask = pad_context_numpy(
-        history,
-        int(context_agent.config["context_length"]),
-        int(context_agent.config["context_token_dim"]),
-    )
-    mean, _ = context_agent.infer_posterior(
-        jnp.asarray(context_tokens)[None],
-        jnp.asarray(context_mask)[None],
-    )
-    mean = jnp.asarray(mean, dtype=jnp.float32)
-    ready = jnp.asarray([1.0], dtype=jnp.float32)
+    context_tokens = jnp.asarray(context_tokens)[None]
+    context_mask = jnp.asarray(context_mask)[None]
+    mean = jnp.asarray(mean)
+    ready = jnp.asarray(ready)
 
     horizon = int(context_agent.config["horizon_length"])
     action_dim = int(context_agent.config["action_dim"])
@@ -125,10 +122,7 @@ def sample_cnorm_chunk(
         jnp.arange(denoise_steps),
         length=denoise_steps,
     )
-    return np.asarray(
-        jnp.clip(actions, -1.0, 1.0)[0],
-        dtype=np.float32,
-    ).reshape(horizon, action_dim)
+    return jnp.clip(actions, -1.0, 1.0)[0]
 
 
 def rollout_episode(
@@ -158,13 +152,33 @@ def rollout_episode(
     while not done and episode_length < max_transitions:
         key = action_key(action_seed_base, episode_index, chunk_index)
         if contextual:
-            commands = sample_cnorm_chunk(
+            context_tokens, context_mask = pad_context_numpy(
+                history,
+                int(context_agent.config["context_length"]),
+                int(context_agent.config["context_token_dim"]),
+            )
+            mean, _ = context_agent.infer_posterior(
+                jnp.asarray(context_tokens)[None],
+                jnp.asarray(context_mask)[None],
+            )
+            mean = np.asarray(mean, dtype=np.float32)
+            ready = np.asarray([1.0], dtype=np.float32)
+            commands = np.asarray(
+                sample_cnorm_chunk(
                 native_agent,
                 context_agent,
                 observation,
                 key,
                 alpha,
-                history,
+                context_tokens,
+                context_mask,
+                mean,
+                ready,
+                ),
+                dtype=np.float32,
+            ).reshape(
+                int(context_agent.config["horizon_length"]),
+                int(context_agent.config["action_dim"]),
             )
         else:
             flat = native_agent.sample_actions(
