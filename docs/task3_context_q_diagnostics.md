@@ -336,3 +336,55 @@ not establish that Context-Q is a globally better value function.
 ```text
 exp/task3_mc_matrix_alpha000/matrix_seed*/result.json
 ```
+
+## MC calibration across guidance weights
+
+The original paired MC calibration was rerun at the full guidance-weight grid.
+For each alpha, native Q and Context-Q were evaluated at the same native-rollout
+query points and the same native continuation policy.
+
+Mean MAE across the three seeds:
+
+| alpha | Native Q MAE | Context-Q MAE | Delta | Which is better |
+|---:|---:|---:|---:|---|
+| 0.000 | 561.65 | 753.39 | +191.74 | Native |
+| 0.004 | 122.03 | 308.38 | +186.35 | Native |
+| 0.008 | 120.22 | 129.31 | +9.09 | Tie |
+| 0.010 | 173.36 | 106.31 | -67.05 | Context-Q |
+| 0.020 | 328.56 | 154.50 | -174.07 | Context-Q |
+| 0.040 | 277.20 | 180.01 | -97.18 | Context-Q |
+| 0.060 | 198.71 | 185.15 | -13.55 | Context-Q (weak) |
+| 0.080 | 166.71 | 227.14 | +60.43 | Native |
+| 0.100 | 217.53 | 342.81 | +125.28 | Native |
+| 0.120 | 314.49 | 445.40 | +130.91 | Native |
+
+Delta is defined as:
+
+```text
+Delta = |Q_context - G_MC| - |Q_native - G_MC|
+```
+
+Negative values favor Context-Q.
+
+### Interpretation
+
+Context-Q is not globally better calibrated. It is better only in a middle
+band of guidance strengths:
+
+```text
+alpha <= 0.004: native Q better
+alpha ~= 0.008: tie
+alpha 0.01-0.06: Context-Q better
+alpha >= 0.08: native Q better
+```
+
+This strongly supports a distribution-specific explanation: Context-Q's
+calibration advantage depends on the trajectory and action distribution
+induced by the guidance weight. The earlier `alpha=0.04` MC result was real
+for that distribution, but it does not generalize across the full alpha range.
+
+### Artifacts
+
+```text
+exp/task3_mc_alpha_sweep_v1/alpha_*/seed*/result.json
+```
