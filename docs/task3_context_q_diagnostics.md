@@ -464,3 +464,31 @@ approximately -32 to -36 pp. The pilot therefore supports the hypothesis that a
 meaningful part of the degradation comes from gradient-scale mismatch, not only
 from gradient direction. A larger 30-episode run is still needed before making
 a final claim.
+
+### Full C-norm run (30 episodes per seed)
+
+| seed | Native success | C-norm Context success | Delta |
+|---:|---:|---:|---:|
+| 1 | 70.00% | 56.67% | -13.33 pp |
+| 2 | 56.67% | 26.67% | -30.00 pp |
+| 3 | 43.33% | 23.33% | -20.00 pp |
+
+Average:
+
+```text
+Native:          56.67%
+C-norm Context:  35.56%
+Delta:           -21.11 pp
+```
+
+Return:
+
+```text
+Native:          -1434.37
+C-norm Context:  -1304.74
+Delta:           +129.63
+```
+
+The full run supports the same conclusion as the pilot: matching the Context
+gradient norm to native substantially reduces the success gap, but does not
+fully eliminate it. Direction and other conditioning effects remain.
