@@ -388,3 +388,57 @@ for that distribution, but it does not generalize across the full alpha range.
 ```text
 exp/task3_mc_alpha_sweep_v1/alpha_*/seed*/result.json
 ```
+
+## Q-gradient scale measurement
+
+At paired query points with the same native actor, same initial action noise,
+and the same one-step action approximation, we measured:
+
+```text
+g_native = grad_a Q_native
+g_context = grad_a Q_context
+```
+
+| seed | norm ratio mean | norm ratio median | norm ratio P90 | norm ratio P99 |
+|---:|---:|---:|---:|---:|
+| 1 | 1.55 | 0.74 | 2.64 | 9.26 |
+| 2 | 1.22 | 0.80 | 2.64 | 3.55 |
+| 3 | 2.06 | 1.15 | 3.19 | 10.04 |
+
+Norm ratio is:
+
+```text
+||g_context|| / (||g_native|| + eps)
+```
+
+Direction similarity:
+
+| seed | cosine mean | cosine median | cosine P10 | cosine P90 |
+|---:|---:|---:|---:|---:|
+| 1 | 0.44 | 0.51 | 0.16 | 0.82 |
+| 2 | 0.46 | 0.61 | -0.18 | 0.97 |
+| 3 | 0.37 | 0.40 | -0.18 | 0.88 |
+
+Action saturation was low in this measurement, with P90 near 0.00 to 0.12.
+
+### Interpretation
+
+The gradient scale hypothesis is supported:
+
+```text
+median norm ratio is often below 1.0
+but upper-tail ratios reach about 9-10x
+direction cosine can be near zero or negative for some queries
+```
+
+This means a fixed alpha cannot make native and Context guidance equivalent.
+The next required ablation is C-norm:
+
+```text
+keep Context gradient direction
+replace its per-query norm with the native norm
+```
+
+The C-norm implementation has been added, but its unoptimized custom denoising
+loop is too slow for the full 30-episode paired run and still needs JIT
+optimization.
