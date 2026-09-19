@@ -39,6 +39,7 @@ PYTHONPATH="$MUJOCO_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}" exec "$PYTHON_BIN" ma
   --agent.actor_hidden_dims='(1024,1024,1024,1024)' \
   --agent.value_network_kwargs.hidden_dims='(1024,1024,1024,1024)' \
   --eval_interval=0 \
+  --eval_vecenv_size=1 \
   --save_interval=5000 \
   --guidance_weights=0.0,0.004,0.008,0.01,0.02,0.04,0.06,0.08 \
   --wandb_offline=true \

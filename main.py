@@ -250,8 +250,12 @@ def _setup_data(config):
             sparse=FLAGS.sparse,
         )
 
-    # Eval envs (vectorized version available, but video rendering needs single process env)
-    if FLAGS.eval_vecenv_size > 1:
+    # Do not fork evaluation workers for a training run that never evaluates.
+    # Besides wasting resources, forking after JAX initialization can duplicate
+    # accelerator state and deadlock on some hosts.  Eval-only mode still builds
+    # the requested vector environment.
+    needs_vector_eval = FLAGS.eval_only or FLAGS.eval_interval != 0
+    if needs_vector_eval and FLAGS.eval_vecenv_size > 1:
         assert (
             FLAGS.eval_episodes % FLAGS.eval_vecenv_size == 0
         ), "eval_episodes must be divisible by eval_vecenv_size"
