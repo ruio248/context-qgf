@@ -58,7 +58,9 @@ mkdir -p "$LOG_ROOT"
 
 find_final_checkpoint() {
   local root="$1"
-  find "$root" -type f -name "params_${FINAL_EPOCH}.pkl" -printf '%h\n' 2>/dev/null | sort | tail -n 1
+  # A fresh arm root does not exist yet.  With ``set -o pipefail`` that is an
+  # expected empty result rather than a launcher failure.
+  { find "$root" -type f -name "params_${FINAL_EPOCH}.pkl" -printf '%h\n' 2>/dev/null || true; } | sort | tail -n 1
 }
 
 adapter_checkpoint="$(find_final_checkpoint "$ADAPTER_ROOT")"
